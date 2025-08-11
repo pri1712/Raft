@@ -13,24 +13,25 @@ import (
 	"sync/atomic"
 	"time"
 
+	_ "raft/src/labgob"
 	"raft/src/labrpc"
-	//	"6.5840/labgob"
 	"raft/src/raftapi"
 	"raft/src/tester1"
 )
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *tester.Persister   // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
-
+	mu          sync.Mutex          // Lock to protect shared access to this peer's state
+	peers       []*labrpc.ClientEnd // RPC end points of all peers
+	persister   *tester.Persister   // Object to hold this peer's persisted state
+	me          int                 // this peer's index into peers[]
+	dead        int32               // set by Kill()
+	eventLogs   []int
+	votedFor    int
+	currentTerm int
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
 }
 
 // return currentTerm and whether this server
@@ -101,12 +102,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	term         int
+	candidateId  int
+	lastLogIndex int
+	lastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	term        int
+	voteGranted bool
 }
 
 // example RequestVote RPC handler.
