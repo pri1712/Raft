@@ -51,8 +51,15 @@ type Raft struct {
 	//election information
 	electionTimeout time.Duration
 	LastHeartBeat   time.Time
+	VoteCount       int
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+}
+
+type AppendEntriesArgs struct {
+}
+
+type AppendEntriesReply struct {
 }
 type State int
 
@@ -231,25 +238,40 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) StartElection() {
 	//vote for self, increment the term and send requestvote rpc
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.VoteCount++
 	lastLogIndex := 0
 	lastLogTerm := 0
 	if len(rf.eventLogs) > 0 {
 		lastLogIndex = len(rf.eventLogs) - 1
 		lastLogTerm = rf.eventLogs[len(rf.eventLogs)-1].term
 	}
-	for i, _ := range rf.peers {
+	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		request := &RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, lastLogTerm}
-		reply := &RequestVoteReply{}
-		rf.RequestVote(i, request, reply)
-		if reply.VoteGranted {
-			log.Printf("Vote Granted from %v", rf.peers[i])
-		}
+		go func(server int) {
+			request := &RequestVoteArgs{rf.currentTerm, rf.me, lastLogIndex, lastLogTerm}
+			reply := &RequestVoteReply{}
+			rf.RequestVote(server, request, reply)
+			if reply.VoteGranted {
+				log.Printf("Vote Granted from %v", rf.peers[i])
+				rf.VoteCount++
+				if rf.VoteCount > len(rf.peers)/2 {
+					rf.state = Leader
+					rf.LastHeartBeat = time.Now()
+				}
+			} else if reply.Term > rf.currentTerm {
+				rf.state = Follower
+				rf.VoteCount = 0
+				rf.votedFor = -1
+				rf.currentTerm = reply.Term
+			}
+		}(i)
 	}
 }
 func (rf *Raft) ticker() {
@@ -264,7 +286,6 @@ func (rf *Raft) ticker() {
 			rf.LastHeartBeat = time.Now()
 		}
 		rf.mu.Unlock()
-
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
