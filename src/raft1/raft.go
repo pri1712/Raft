@@ -19,19 +19,45 @@ import (
 	"raft/src/tester1"
 )
 
+const (
+	Follower State = iota
+	Candidate
+	Leader
+)
+
+const MinTime int = 1
+const MaxTime int = 2
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu          sync.Mutex          // Lock to protect shared access to this peer's state
-	peers       []*labrpc.ClientEnd // RPC end points of all peers
-	persister   *tester.Persister   // Object to hold this peer's persisted state
-	me          int                 // this peer's index into peers[]
-	dead        int32               // set by Kill()
-	eventLogs   []int
+	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     []*labrpc.ClientEnd // RPC end points of all peers
+	persister *tester.Persister   // Object to hold this peer's persisted state
+	me        int                 // this peer's index into peers[]
+	dead      int32               // set by Kill()
+	//persist to disk
+	eventLogs   []logEntry
 	votedFor    int
 	currentTerm int
+	//volatile information
+	commitIndex int
+	lastApplied int
+	//for leader only.
+	nextIndex  []int
+	matchIndex []int
+	//state information
+	state State
+	//election information
+	electionTimeout time.Duration
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+}
+type State int
+
+type logEntry struct {
+	term    int
+	Command interface{}
 }
 
 // return currentTerm and whether this server
@@ -41,6 +67,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	term = rf.currentTerm
+	if rf.state == Leader {
+		isleader = true
+	}
 	return term, isleader
 }
 
@@ -102,18 +132,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
-	term         int
-	candidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term         int //current term on candidate server.
+	CandidateId  int //id of the candidate server.
+	LastLogIndex int //last index the server has filled up in its log.
+	LastLogTerm  int //term of the item at the last log index.
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
-	term        int
-	voteGranted bool
+	Term        int  //currentTerm, for candidate to update itself
+	VoteGranted bool //if vote was given or not to the current candidate.
 }
 
 // example RequestVote RPC handler.
@@ -139,7 +169,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // can't be reached, a lost request, or a lost reply.
 //
 // Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
+// handler function on the server side does not return.Thus, there
 // is no need to implement your own timeouts around Call().
 //
 // look at the comments in ../labrpc/labrpc.go for more details.
@@ -222,7 +252,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-
+	rf.votedFor = -1
+	rf.currentTerm = 0
+	rf.state = Follower
+	rf.electionTimeout = time.Duration(rand.Intn(MaxTime-MinTime+1) + MinTime)
 	// Your initialization code here (3A, 3B, 3C).
 
 	// initialize from state persisted before a crash
