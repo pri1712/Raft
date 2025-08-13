@@ -54,6 +54,7 @@ type Raft struct {
 	ElectionTimeout time.Duration
 	LastHeartBeat   time.Time
 	VoteCount       int
+	StopHeartBeat   chan bool
 	// Look at the paper's Figure 2 for a description of what
 	// ServerState a Raft server must maintain.
 }
@@ -164,65 +165,6 @@ type RequestVoteReply struct {
 	VoteGranted bool //if vote was given or not to the current candidate.
 }
 
-// RequestVote example RequestVote RPC handler.This is implemented on the servers receiving the RPC
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	log.Printf("In requesting vote")
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	reply.VoteGranted = false
-	if args.Term < rf.CurrentTerm {
-		reply.Term = rf.CurrentTerm
-		log.Printf("Term of candidate %d cannot be less than current Term %d\n", args.Term, rf.CurrentTerm)
-		//return nil
-	}
-	if rf.ServerState == Leader && args.Term > rf.CurrentTerm {
-		log.Printf("In the second if")
-		rf.CurrentTerm = reply.Term
-		rf.ServerState = Follower
-		rf.VotedFor = -1
-		rf.VoteCount = 0
-	}
-	//grant vote only if;
-	//1. Candidate's Term >= CurrentTerm
-	//2. didnt vote for anyone yet or voted for this candidate
-	//3. candidates log entries are atleast as up to date as ours.
-	//by that I mean, If the logs have last entries with different terms, then
-	//the log with the later Term is more up-to-date. If the logs
-	//end with the same Term, then whichever log is longer is
-	//more up-to-date
-	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
-		reply.VoteGranted = true
-		rf.VotedFor = args.CandidateId
-		reply.Term = rf.CurrentTerm
-		//make sure to add log checks here.
-	}
-	log.Printf("Vote granted to %v", args.CandidateId)
-	//return nil
-}
-
-func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	if reply.Term > rf.CurrentTerm {
-		rf.CurrentTerm = reply.Term
-		rf.VotedFor = -1
-		rf.VoteCount = 0
-		rf.ServerState = Follower
-		return
-	}
-
-	if reply.VoteGranted {
-		//vote counting.
-		rf.VoteCount++
-		if rf.VoteCount >= len(rf.peers)/2 {
-			//become leader and send out rpc to all the other peers.
-			rf.ServerState = Leader
-
-		}
-	}
-}
-
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -250,10 +192,6 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -294,11 +232,6 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
-}
-
-func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
 }
 
 //func (rf *Raft) HandleAppendEntries(reply *AppendEntriesReply) {
@@ -356,6 +289,157 @@ func (rf *Raft) SendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //	}
 //}
 
+func (rf *Raft) PeriodicHeartbeats() {
+	heartbeatInterval := 100 * time.Millisecond
+	ticker := time.NewTicker(heartbeatInterval)
+	log.Printf("Heartbeat periodic every %v", heartbeatInterval)
+	//when just became a leader send it right away.
+	rf.SendHeartbeatImmediate()
+	for {
+		select {
+		// if not the leader. cant send out shit.
+		case <-ticker.C:
+			rf.mu.Lock()
+			if rf.ServerState != Leader {
+				log.Printf("%v is no longer a leader and cant send out heartbeats", rf.me)
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+			rf.SendHeartbeatImmediate()
+		}
+	}
+}
+
+func (rf *Raft) SendHeartbeatImmediate() {
+	rf.mu.Lock()
+	if rf.ServerState != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	term := rf.CurrentTerm
+	leaderId := rf.me
+	rf.mu.Unlock()
+	for i, _ := range rf.peers {
+		if i == leaderId {
+			continue
+		}
+		go rf.SendToPeers(i, term, leaderId) //send concurrently to increase speed.
+	}
+
+}
+
+func (rf *Raft) SendToPeers(server int, term int, leaderId int) {
+	rf.mu.Lock()
+	if rf.ServerState != Leader || rf.CurrentTerm != term { //in case it's been modified by some other node.
+		rf.mu.Unlock()
+		return
+	}
+	request := &AppendEntriesArgs{
+		Term:         term,
+		LeaderId:     leaderId,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      nil,
+		LeaderCommit: 0,
+	}
+	reply := &AppendEntriesReply{}
+	ok := rf.peers[server].Call("AppendEntries", request, reply)
+	if !ok {
+		log.Printf("AppendEntries failed for server %d", server)
+	}
+}
+
+// AppendEntries , this is on the server that is on the receiving end of the RPC.
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Success = false
+	//if the heartbeat server has a lower term than this server, step down.
+	if args.Term < rf.CurrentTerm {
+		reply.Term = rf.CurrentTerm
+		return
+	} else if args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = args.Term
+		rf.VotedFor = -1
+		rf.ServerState = Follower
+	}
+	rf.LastHeartBeat = time.Now()
+	rf.ServerState = Follower
+	reply.Term = rf.CurrentTerm
+	reply.Success = true
+}
+
+func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.Term > rf.CurrentTerm {
+		rf.CurrentTerm = reply.Term
+		rf.VotedFor = -1
+		rf.VoteCount = 0
+		rf.ServerState = Follower
+		return
+	}
+
+	if reply.VoteGranted {
+		//vote counting.
+		rf.VoteCount++
+		if rf.VoteCount > len(rf.peers)/2 {
+			//become leader and send out rpc to all the other peers.
+			rf.ServerState = Leader
+			for i, _ := range rf.peers {
+				rf.NextIndex[i] = len(rf.EventLogs)
+				rf.MatchIndex[i] = 0
+			}
+			log.Printf("Server %d became leader for term %d", rf.me, rf.CurrentTerm)
+			go rf.PeriodicHeartbeats()
+		}
+	}
+}
+
+// RequestVote example RequestVote RPC handler.This is implemented on the servers receiving the RPC
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	log.Printf("In requesting vote")
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.VoteGranted = false
+	if args.Term < rf.CurrentTerm {
+		reply.Term = rf.CurrentTerm
+		log.Printf("Term of candidate %d cannot be less than current Term %d\n", args.Term, rf.CurrentTerm)
+		//return nil
+	}
+	if rf.ServerState == Leader && args.Term > rf.CurrentTerm {
+		log.Printf("In the second if")
+		rf.CurrentTerm = args.Term
+		reply.Term = rf.CurrentTerm
+		rf.ServerState = Follower
+		rf.VotedFor = -1
+		rf.VoteCount = 0
+	}
+	//grant vote only if;
+	//1. Candidate's Term >= CurrentTerm
+	//2. didnt vote for anyone yet or voted for this candidate
+	//3. candidates log entries are atleast as up to date as ours.
+	//by that I mean, If the logs have last entries with different terms, then
+	//the log with the later Term is more up-to-date. If the logs
+	//end with the same Term, then whichever log is longer is
+	//more up-to-date
+	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
+		reply.VoteGranted = true
+		rf.VotedFor = args.CandidateId
+		reply.Term = rf.CurrentTerm
+		//make sure to add log checks here.
+	}
+	log.Printf("Vote granted to %v", args.CandidateId)
+	//return nil
+}
+
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
 func (rf *Raft) StartElection() {
 	//vote for self, increment the Term and send requestvote rpc
 	log.Printf("Start Election")
@@ -408,34 +492,41 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func (rf *Raft) SendHeartbeats() {
-
-	if rf.ServerState == Leader {
-		//send heartbeat rpc to all peers.
-		for i, _ := range rf.peers {
-			if i == rf.me {
-				continue
-			}
-			server := i
-			request := &AppendEntriesArgs{
-				Term:         rf.CurrentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: 0,
-				PrevLogTerm:  0,
-				Entries:      nil,
-				LeaderCommit: 0,
-			}
-			reply := &AppendEntriesReply{}
-			ok := rf.peers[server].Call("AppendEntries", request, reply)
-			if !ok {
-				log.Println("Heartbeat Failed")
-			}
-		}
-	} else {
-		log.Printf("Server %v not a Leader %v", rf.me, rf.ServerState)
-		return
-	}
-}
+//func (rf *Raft) SendHeartbeats() {
+//
+//	if rf.ServerState == Leader {
+//		//send heartbeat rpc to all peers.
+//		for i, _ := range rf.peers {
+//			if i == rf.me {
+//				continue
+//			}
+//			server := i
+//			request := &AppendEntriesArgs{
+//				Term:         rf.CurrentTerm,
+//				LeaderId:     rf.me,
+//				PrevLogIndex: 0,
+//				PrevLogTerm:  0,
+//				Entries:      nil,
+//				LeaderCommit: 0,
+//			}
+//			reply := &AppendEntriesReply{}
+//			ok := rf.peers[server].Call("AppendEntries", request, reply)
+//			if !ok {
+//				log.Println("Heartbeat Failed")
+//			} else {
+//				if reply.Term > rf.CurrentTerm {
+//					rf.CurrentTerm = reply.Term
+//					rf.ServerState = Follower
+//					rf.VotedFor = -1
+//					rf.VoteCount = 0
+//				}
+//			}
+//		}
+//	} else {
+//		log.Printf("Server %v not a Leader %v", rf.me, rf.ServerState)
+//		return
+//	}
+//}
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -465,11 +556,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.NextIndex = make([]int, len(rf.peers))
 	rf.MatchIndex = make([]int, len(rf.peers))
 	rf.LastHeartBeat = time.Now()
+	rf.StopHeartBeat = make(chan bool, 1)
 	// initialize from ServerState persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	go rf.SendHeartbeats()
+	//go rf.SendHeartbeats()
 	log.Printf("Methods on *Raft: %+v", reflect.TypeOf(rf))
 	for i := 0; i < reflect.TypeOf(rf).NumMethod(); i++ {
 		log.Printf("Method: %s", reflect.TypeOf(rf).Method(i).Name)
