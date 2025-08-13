@@ -36,18 +36,18 @@ func TestInitialElection3A(t *testing.T) {
 	ts.checkOneLeader()
 
 	// sleep a bit to avoid racing with followers learning of the
-	// election, then check that all peers agree on the term.
+	// election, then check that all peers agree on the Term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := ts.checkTerms()
 	if term1 < 1 {
-		ts.t.Fatalf("term is %v, but should be at least 1", term1)
+		ts.t.Fatalf("Term is %v, but should be at least 1", term1)
 	}
 
-	// does the leader+term stay the same if there is no network failure?
+	// does the leader+Term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
 	term2 := ts.checkTerms()
 	if term1 != term2 {
-		fmt.Printf("warning: term changed even though there were no failures")
+		fmt.Printf("warning: Term changed even though there were no failures")
 	}
 
 	// there should still be a leader.
@@ -408,8 +408,8 @@ loop:
 
 		for j := 0; j < servers; j++ {
 			if t, _ := ts.srvs[j].Raft().GetState(); t != term {
-				// term changed -- can't expect low RPC counts
-				details := fmt.Sprintf("term of server %v changed from %v to %v",
+				// Term changed -- can't expect low RPC counts
+				details := fmt.Sprintf("Term of server %v changed from %v to %v",
 					j, term, t)
 				tester.AnnotateCheckerNeutral(despretry, details)
 				continue loop
@@ -427,7 +427,7 @@ loop:
 					// have succeeded
 					failed = true
 					details := fmt.Sprintf(
-						"term changed while waiting for %v servers to commit index %v",
+						"Term changed while waiting for %v servers to commit index %v",
 						servers, index)
 					tester.AnnotateCheckerNeutral(despretry, details)
 					break
@@ -472,7 +472,7 @@ loop:
 		tester.AnnotateCheckerFailure(
 			"agreement failed under concurrent submission",
 			"unable to reach agreement after 5 attempts")
-		t.Fatalf("term changed too often")
+		t.Fatalf("Term changed too often")
 	}
 
 	text := "agreement reached under concurrent submission"
@@ -660,13 +660,13 @@ loop:
 			index1, term1, ok := ts.srvs[leader].Raft().Start(x)
 			if term1 != term {
 				// Term changed while starting
-				details := fmt.Sprintf("term of the leader (%v) changed from %v to %v",
+				details := fmt.Sprintf("Term of the leader (%v) changed from %v to %v",
 					leader, term, term1)
 				tester.AnnotateCheckerNeutral(despretry, details)
 				continue loop
 			}
 			if !ok {
-				// No longer the leader, so term has changed
+				// No longer the leader, so Term has changed
 				details := fmt.Sprintf("%v is no longer a leader", leader)
 				tester.AnnotateCheckerNeutral(despretry, details)
 				continue loop
@@ -685,15 +685,15 @@ loop:
 			cmd := ts.wait(starti+i, servers, term)
 			if ix, ok := cmd.(int); ok == false || ix != cmds[i-1] {
 				if ix == -1 {
-					// term changed -- try again
+					// Term changed -- try again
 					details := fmt.Sprintf(
-						"term changed while waiting for %v servers to commit index %v",
+						"Term changed while waiting for %v servers to commit index %v",
 						servers, starti+i)
 					tester.AnnotateCheckerNeutral(despretry, details)
 					continue loop
 				}
 				details := fmt.Sprintf(
-					"the command submitted at index %v in term %v is %v, but read %v",
+					"the command submitted at index %v in Term %v is %v, but read %v",
 					starti+i, term, cmds[i-1], cmd)
 				tester.AnnotateCheckerFailure("incorrect command committed", details)
 				t.Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, starti+i, cmds)
@@ -704,9 +704,9 @@ loop:
 		total2 = 0
 		for j := 0; j < servers; j++ {
 			if t, _ := ts.srvs[j].Raft().GetState(); t != term {
-				// term changed -- can't expect low RPC counts
+				// Term changed -- can't expect low RPC counts
 				// need to keep going to update total2
-				details := fmt.Sprintf("term of server %v changed from %v to %v", j, term, t)
+				details := fmt.Sprintf("Term of server %v changed from %v to %v", j, term, t)
 				tester.AnnotateCheckerNeutral(despretry, details)
 				failed = true
 			}
@@ -736,7 +736,7 @@ loop:
 		tester.AnnotateCheckerFailure(
 			"agreement failed",
 			"unable to reach agreement after 5 attempts")
-		t.Fatalf("term changed too often")
+		t.Fatalf("Term changed too often")
 	}
 
 	tester.AnnotateCheckerBegin("checking reasonable RPC counts in idle")
@@ -897,7 +897,7 @@ func TestPersist33C(t *testing.T) {
 // probability (perhaps without committing the command), or crash after a while
 // with low probability (most likey committing the command).  If the number of
 // alive servers isn't enough to form a majority, perhaps start a new server.
-// The leader in a new term may try to finish replicating log entries that
+// The leader in a new Term may try to finish replicating log entries that
 // haven't been committed yet.
 func TestFigure83C(t *testing.T) {
 	servers := 5
@@ -1354,7 +1354,7 @@ func TestSnapshotAllCrash3D(t *testing.T) {
 }
 
 // do servers correctly initialize their in-memory copy of the snapshot, making
-// sure that future writes to persistent state don't lose state?
+// sure that future writes to persistent ServerState don't lose ServerState?
 func TestSnapshotInit3D(t *testing.T) {
 	servers := 3
 	ts := makeTest(t, servers, false, true)

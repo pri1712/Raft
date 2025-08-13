@@ -79,9 +79,9 @@ func (ts *Test) checkOneLeader() int {
 		lastTermWithLeader := -1
 		for term, leaders := range leaders {
 			if len(leaders) > 1 {
-				details := fmt.Sprintf("multiple leaders in term %v = %v", term, leaders)
+				details := fmt.Sprintf("multiple leaders in Term %v = %v", term, leaders)
 				tester.AnnotateCheckerFailure("multiple leaders", details)
-				ts.Fatalf("term %d has %d (>1) leaders", term, len(leaders))
+				ts.Fatalf("Term %d has %d (>1) leaders", term, len(leaders))
 			}
 			if term > lastTermWithLeader {
 				lastTermWithLeader = term
@@ -89,7 +89,7 @@ func (ts *Test) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
-			details := fmt.Sprintf("leader in term %v = %v",
+			details := fmt.Sprintf("leader in Term %v = %v",
 				lastTermWithLeader, leaders[lastTermWithLeader][0])
 			tester.AnnotateCheckerSuccess(details, details)
 			return leaders[lastTermWithLeader][0]
@@ -102,7 +102,7 @@ func (ts *Test) checkOneLeader() int {
 }
 
 func (ts *Test) checkTerms() int {
-	tester.AnnotateCheckerBegin("checking term agreement")
+	tester.AnnotateCheckerBegin("checking Term agreement")
 	term := -1
 	for i := 0; i < ts.n; i++ {
 		if ts.g.IsConnected(i) {
@@ -112,13 +112,13 @@ func (ts *Test) checkTerms() int {
 			} else if term != xterm {
 				details := fmt.Sprintf("node ids -> terms = { %v -> %v; %v -> %v }",
 					i-1, term, i, xterm)
-				tester.AnnotateCheckerFailure("term disagreed", details)
-				ts.Fatalf("servers disagree on term")
+				tester.AnnotateCheckerFailure("Term disagreed", details)
+				ts.Fatalf("servers disagree on Term")
 			}
 		}
 	}
-	details := fmt.Sprintf("term = %v", term)
-	tester.AnnotateCheckerSuccess("term agreed", details)
+	details := fmt.Sprintf("Term = %v", term)
+	tester.AnnotateCheckerSuccess("Term agreed", details)
 	return term
 }
 
@@ -317,7 +317,7 @@ func (ts *Test) wait(index int, n int, startTerm int) any {
 	if nd < n {
 		desp := fmt.Sprintf("less than %v servers commit index %v", n, index)
 		details := fmt.Sprintf(
-			"only %v (< %v) servers commit index %v at term %v", nd, n, index, startTerm)
+			"only %v (< %v) servers commit index %v at Term %v", nd, n, index, startTerm)
 		tester.AnnotateCheckerFailure(desp, details)
 		ts.Fatalf("only %d decided for index %d; wanted %d",
 			nd, index, n)
