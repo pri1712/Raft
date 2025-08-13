@@ -408,6 +408,35 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) SendHeartbeats() {
+
+	if rf.ServerState == Leader {
+		//send heartbeat rpc to all peers.
+		for i, _ := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			server := i
+			request := &AppendEntriesArgs{
+				Term:         rf.CurrentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: 0,
+				PrevLogTerm:  0,
+				Entries:      nil,
+				LeaderCommit: 0,
+			}
+			reply := &AppendEntriesReply{}
+			ok := rf.peers[server].Call("AppendEntries", request, reply)
+			if !ok {
+				log.Println("Heartbeat Failed")
+			}
+		}
+	} else {
+		log.Printf("Server %v not a Leader %v", rf.me, rf.ServerState)
+		return
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -440,6 +469,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.SendHeartbeats()
 	log.Printf("Methods on *Raft: %+v", reflect.TypeOf(rf))
 	for i := 0; i < reflect.TypeOf(rf).NumMethod(); i++ {
 		log.Printf("Method: %s", reflect.TypeOf(rf).Method(i).Name)
