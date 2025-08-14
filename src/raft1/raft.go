@@ -290,11 +290,12 @@ func (rf *Raft) killed() bool {
 
 // AppendEntries , this is on the server that is on the receiving end of the RPC.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//log.Printf("In appendentries")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("AppendEntries", rf.me)
 	defer rf.mu.Unlock()
 	reply.Success = false
-	log.Printf("AppendEntries for server in func AppendEntries %d", rf.me)
+	//log.Printf("AppendEntries for server in func AppendEntries %d", rf.me)
 	//if the heartbeat server has a lower term than this server, step down.
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
@@ -327,12 +328,13 @@ func (rf *Raft) SendToPeers(server int, term int, leaderId int) {
 	}
 	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
-	log.Printf("Sending AppendEntries to %v", server)
-	ok := rf.peers[server].Call("AppendEntries", request, reply)
+	//log.Printf("Sending AppendEntries to %v", server)
+	//log.Printf("peers: %v", rf.peers[server])
+	ok := rf.peers[server].Call("Raft.AppendEntries", request, reply)
 	if !ok {
 		log.Printf("AppendEntries failed for server %d", server)
 	} else {
-		log.Printf("AppendEntries for server %d", server)
+		//log.Printf("AppendEntries for server %d", server)
 	}
 }
 
@@ -350,7 +352,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 		if i == leaderId {
 			continue
 		}
-		log.Printf("Sending heartbeat to %v", i)
+		//log.Printf("Sending heartbeat to %v", i)
 		go rf.SendToPeers(i, term, leaderId) //send concurrently to increase speed.
 	}
 
@@ -361,7 +363,7 @@ func (rf *Raft) PeriodicHeartbeats() {
 	heartbeatInterval := 100 * time.Millisecond
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
-	log.Printf("Heartbeat periodic every %v", heartbeatInterval)
+	//log.Printf("Heartbeat periodic every %v", heartbeatInterval)
 	//when just became a leader send it right away.
 	rf.SendHeartbeatImmediate()
 	for {
@@ -375,7 +377,7 @@ func (rf *Raft) PeriodicHeartbeats() {
 				return
 			}
 			rf.mu.Unlock()
-			log.Printf("Sending out heartbeats now")
+			//log.Printf("Sending out heartbeats now")
 			rf.SendHeartbeatImmediate()
 		}
 	}
@@ -401,7 +403,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 			//become leader and send out rpc to all the other peers.
 			rf.ServerState = Leader
 			for i, _ := range rf.peers {
-				log.Printf("len of eventLogs: %v", len(rf.EventLogs))
+				//log.Printf("len of eventLogs: %v", len(rf.EventLogs))
 				rf.NextIndex[i] = len(rf.EventLogs)
 				rf.MatchIndex[i] = 0
 			}
@@ -413,7 +415,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 
 // RequestVote example RequestVote RPC handler.This is implemented on the servers receiving the RPC
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	log.Printf("In requesting vote")
+	//log.Printf("In requesting vote")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("RequestVote", rf.me)
 	defer rf.mu.Unlock()
@@ -425,7 +427,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//return nil
 	}
 	if args.Term > rf.CurrentTerm {
-		log.Printf("Server %d updating term from %d to %d, becoming follower", rf.me, rf.CurrentTerm, args.Term)
+		//log.Printf("Server %d updating term from %d to %d, becoming follower", rf.me, rf.CurrentTerm, args.Term)
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
 		rf.ServerState = Follower
@@ -446,7 +448,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.CurrentTerm
 		//make sure to add log checks here.
 	}
-	log.Printf("Vote granted to %v", args.CandidateId)
+	//log.Printf("Vote granted to %v", args.CandidateId)
 	//return nil
 }
 
@@ -458,7 +460,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) StartElection() {
 	//vote for self, increment the Term and send requestvote rpc
-	log.Printf("Start Election")
+	//log.Printf("Start Election")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("StartElection", rf.me)
 	rf.CurrentTerm++
@@ -482,7 +484,7 @@ func (rf *Raft) StartElection() {
 			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(server, request, reply)
 			if !ok {
-				log.Println("RequestVote Failed")
+				//log.Println("RequestVote Failed")
 			} else {
 				rf.HandleVoteReplies(reply)
 			}
@@ -559,7 +561,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	defer utils.RecoverWithStackTrace("Make", me)
 	rf := &Raft{}
-	log.Printf("Starting a server")
+	//log.Printf("Starting a server")
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -568,7 +570,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.CurrentTerm = 0
 	rf.ServerState = Follower
 	rf.ElectionTimeout = time.Duration(rand.Intn(MaxTime-MinTime+1)+MinTime) * time.Millisecond
-	log.Printf("Timeout is: %v", rf.ElectionTimeout)
+	//log.Printf("Timeout is: %v", rf.ElectionTimeout)
 	rf.CommitIndex = 0
 	rf.LastApplied = 0
 	//log.Printf("length of peers: %v", len(rf.peers))
