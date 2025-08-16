@@ -84,6 +84,8 @@ func (rf *Raft) GetState() (int, bool) {
 	utils.RecoverWithStackTrace("GetState", rf.me)
 	var term int
 	var isleader bool
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Your code here (3A).
 	term = rf.CurrentTerm
 	if rf.ServerState == Leader {
