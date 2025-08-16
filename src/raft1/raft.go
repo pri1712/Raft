@@ -196,50 +196,116 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // the struct itself.
 
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
-	term := eventTerm
-	command := eventCommand
 	rf.mu.Lock()
+	if rf.CurrentTerm != eventTerm || rf.ServerState != Leader {
+		rf.mu.Unlock()
+		return
+	}
 	isLeader := rf.ServerState == Leader
-	prevlogindex := len(rf.EventLogs) - 1
-	prevlogterm := 0
-	if prevlogindex >= 0 {
-		prevlogterm = rf.EventLogs[prevlogindex].Term
-	}
-	request := AppendEntriesArgs{
-		Term:         term,
-		LeaderId:     rf.me,
-		PrevLogIndex: prevlogindex,
-		PrevLogTerm:  prevlogterm,
-		Entries:      []LogEntry{{Term: term, Command: command}},
-		LeaderCommit: rf.CommitIndex,
-	}
-	rf.mu.Unlock()
+	me := rf.me
+	commitIndex := rf.CommitIndex
+	term := rf.CurrentTerm
+	peers := rf.peers
+
 	if isLeader {
-		//send out append entry RPC
-		rf.mu.Lock()
-		for i := range rf.peers {
-			if i == rf.me {
+		for server := range peers {
+			if me == server {
 				continue
 			}
-			go func(server int, localRequest AppendEntriesArgs) {
-				localReply := AppendEntriesReply{}
-				ok := rf.peers[server].Call("AppendEntries", &localRequest, &localReply)
+			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
+			prevlogindex := nextindex - 1
+			prevlogterm := 0
+			if prevlogindex >= 0 && prevlogindex < len(rf.EventLogs) {
+				prevlogterm = rf.EventLogs[prevlogindex].Term
+			}
+			sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
+			copy(sendEntries, rf.EventLogs[nextindex:])
+			request := AppendEntriesArgs{
+				Term:         term,
+				LeaderId:     me,
+				PrevLogIndex: prevlogindex,
+				PrevLogTerm:  prevlogterm,
+				Entries:      sendEntries,
+				LeaderCommit: commitIndex,
+			}
+			rf.mu.Unlock()
+			go func(server int, request AppendEntriesArgs) {
+				reply := AppendEntriesReply{}
+				ok := rf.peers[server].Call("Raft.AppendEntries", &request, &reply)
 				if !ok {
-					log.Printf("Append entries failed in server %v", server)
+					log.Printf("Error while appending entries to server %v", server)
+					return
 				} else {
-					if localReply.Term > rf.CurrentTerm {
-						rf.CurrentTerm = localReply.Term
-						rf.ServerState = Follower
+					//successfully sent an rpc and got a reply
+					rf.mu.Lock()
+					if reply.Term > rf.CurrentTerm {
+						rf.CurrentTerm = reply.Term
 						rf.VotedFor = -1
 						rf.VoteCount = 0
-					} else if !localReply.Success {
-						//gotta do log correction now for the server that has mismatched logs.
+						rf.ServerState = Follower
+						return
+					}
+					if rf.ServerState != Leader || term != rf.CurrentTerm {
+						log.Printf("Cannot be the leader anymore,stepping down.")
+						rf.VoteCount = 0
+						rf.VotedFor = -1
+						return
+					}
+					if reply.Success {
+						log.Printf("Succesfully appended entries to server %v", server)
+
 					}
 				}
-			}(i, request)
+			}(server, request)
 		}
-		rf.mu.Unlock()
+
 	}
+
+	rf.mu.Unlock()
+	//if isLeader {
+	//	//send out append entry RPC
+	//	rf.mu.Lock()
+	//	for i := range rf.peers {
+	//		if i == rf.me {
+	//			continue
+	//		}
+	//		go func(server int) {
+	//			prevlogindex := rf.NextIndex[server] - 1
+	//			prevlogterm := 0
+	//			if prevlogindex >= 0 {
+	//				prevlogterm = rf.EventLogs[prevlogindex].Term
+	//			}
+	//			var sendentry []LogEntry
+	//			for e := range rf.EventLogs {
+	//				sendentry = make([]LogEntry, len(rf.EventLogs[:]))
+	//			}
+	//			localRequest := AppendEntriesArgs{
+	//				Term:         term,
+	//				LeaderId:     rf.me,
+	//				PrevLogIndex: prevlogindex,
+	//				PrevLogTerm:  prevlogterm,
+	//				Entries:      []LogEntry{{Term: term, Command: command}},
+	//				LeaderCommit: rf.CommitIndex,
+	//			}
+	//			localReply := AppendEntriesReply{}
+	//			ok := rf.peers[server].Call("AppendEntries", &localRequest, &localReply)
+	//			if !ok {
+	//				log.Printf("Append entries failed in server %v", server)
+	//			} else {
+	//				if localReply.Term > rf.CurrentTerm {
+	//					rf.CurrentTerm = localReply.Term
+	//					rf.ServerState = Follower
+	//					rf.VotedFor = -1
+	//					rf.VoteCount = 0
+	//				} else if !localReply.Success {
+	//					//gotta do log correction now for the server that has mismatched logs.
+	//				}
+	//			}
+	//		}(i)
+	//	}
+	//	rf.mu.Unlock()
+	//}
+
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
