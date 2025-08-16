@@ -195,6 +195,27 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 
+func (rf *Raft) CheckMajorityAcceptance(term int) {
+	for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
+		if rf.EventLogs[n].Term != term {
+			continue
+		}
+		count := 1
+		for i := range rf.peers {
+			if rf.MatchIndex[i] >= n {
+				//if the current terms entries have been replicated the matchindex would be more than the index of
+				//current term.
+				count++
+			}
+		}
+		if count > len(rf.peers)/2 {
+			log.Printf("This entry can now be committed.")
+
+			rf.CommitIndex = n
+		}
+	}
+}
+
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 	rf.mu.Lock()
 	if rf.CurrentTerm != eventTerm || rf.ServerState != Leader {
@@ -238,6 +259,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 				} else {
 					//successfully sent an rpc and got a reply
 					rf.mu.Lock()
+					defer rf.mu.Unlock()
 					if reply.Term > rf.CurrentTerm {
 						rf.CurrentTerm = reply.Term
 						rf.VotedFor = -1
@@ -253,14 +275,22 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 					}
 					if reply.Success {
 						log.Printf("Succesfully appended entries to server %v", server)
-
+						//till what index did we send. from nextindex onwards till the len(sendentries).
+						lastSent := len(sendEntries) + nextindex
+						if lastSent > rf.MatchIndex[server] {
+							rf.MatchIndex[server] = lastSent
+						}
+						rf.NextIndex[server] = lastSent + 1
+						rf.CheckMajorityAcceptance(rf.CurrentTerm)
+					} else {
+						if rf.NextIndex[server] > 0 {
+							rf.NextIndex[server]-- //backoff and send again.
+						}
 					}
 				}
 			}(server, request)
 		}
-
 	}
-
 	rf.mu.Unlock()
 	//if isLeader {
 	//	//send out append entry RPC
