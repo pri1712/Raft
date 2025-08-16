@@ -56,6 +56,8 @@ type Raft struct {
 	StopHeartBeat   chan bool
 	// Look at the paper's Figure 2 for a description of what
 	// ServerState a Raft server must maintain.
+	//to talk to the application
+	ApplicationChanel chan raftapi.ApplyMsg
 }
 
 type AppendEntriesArgs struct {
@@ -193,6 +195,53 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 
+func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
+	term := eventTerm
+	command := eventCommand
+	rf.mu.Lock()
+	isLeader := rf.ServerState == Leader
+	prevlogindex := len(rf.EventLogs) - 1
+	prevlogterm := 0
+	if prevlogindex >= 0 {
+		prevlogterm = rf.EventLogs[prevlogindex].Term
+	}
+	request := AppendEntriesArgs{
+		Term:         term,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevlogindex,
+		PrevLogTerm:  prevlogterm,
+		Entries:      []LogEntry{{Term: term, Command: command}},
+		LeaderCommit: rf.CommitIndex,
+	}
+	rf.mu.Unlock()
+	if isLeader {
+		//send out append entry RPC
+		rf.mu.Lock()
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			go func(server int, localRequest AppendEntriesArgs) {
+				localReply := AppendEntriesReply{}
+				ok := rf.peers[server].Call("AppendEntries", &localRequest, &localReply)
+				if !ok {
+					log.Printf("Append entries failed in server %v", server)
+				} else {
+					if localReply.Term > rf.CurrentTerm {
+						rf.CurrentTerm = localReply.Term
+						rf.ServerState = Follower
+						rf.VotedFor = -1
+						rf.VoteCount = 0
+					} else if !localReply.Success {
+						//gotta do log correction now for the server that has mismatched logs.
+					}
+				}
+			}(i, request)
+		}
+		rf.mu.Unlock()
+	}
+}
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -208,10 +257,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index := rf.CommitIndex
+	index := len(rf.EventLogs)
 	term := rf.CurrentTerm
 	isLeader := rf.ServerState == Leader
-	// Your code here (3B).
+	if isLeader {
+		go rf.SendEventLogs(term, command)
+		if rf.CommitConsensus > len(rf.peers)/2 {
+			rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
+		}
+	}
 	return index, term, isLeader
 }
 
@@ -269,15 +323,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 	}
-	rf.LastHeartBeat = time.Now()
-	rf.ServerState = Follower
-	reply.Term = rf.CurrentTerm
-	reply.Success = true
+	if args.Entries == nil {
+		//heartbeat
+		rf.LastHeartBeat = time.Now()
+		rf.ServerState = Follower
+		reply.Term = rf.CurrentTerm
+		reply.Success = true
+	} else {
+		//compare logs here.
+		if rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm {
+			//logs are not matching at prev log index, have to keep sending older logs till we get replicated logs.
+			reply.Success = false
+			return
+		} else {
+			//loop through the entries field and append all to logs.
+			for i := range args.Entries {
+				rf.EventLogs = append(rf.EventLogs, args.Entries[i])
+			}
+			reply.Success = true
+			rf.LastHeartBeat = time.Now()
+			rf.ServerState = Follower
+			reply.Term = rf.CurrentTerm
+		}
+	}
 }
 
-func (rf *Raft) SendToPeers(server int, term int, leaderId int) {
+func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	rf.mu.Lock()
-	defer utils.RecoverWithStackTrace("SendToPeers", rf.me)
+	defer utils.RecoverWithStackTrace("SendHeartBeatToPeers", rf.me)
 	if rf.ServerState != Leader || rf.CurrentTerm != term { //in case it's been modified by some other node.
 		rf.mu.Unlock()
 		return
@@ -317,7 +390,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 			continue
 		}
 		//log.Printf("Sending heartbeat to %v", i)
-		go rf.SendToPeers(i, term, leaderId) //send concurrently to increase speed.
+		go rf.SendHeartBeatToPeers(i, term, leaderId) //send concurrently to increase speed.
 	}
 
 }
@@ -389,6 +462,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		log.Printf("Term of candidate %d cannot be less than current Term %d\n", args.Term, rf.CurrentTerm)
 		return
 		//return nil
+	} else if {
+		//check for log conditions for getting a vote here.
 	}
 	if args.Term > rf.CurrentTerm {
 		//log.Printf("Server %d updating term from %d to %d, becoming follower", rf.me, rf.CurrentTerm, args.Term)
@@ -527,6 +602,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf := &Raft{}
 	//log.Printf("Starting a server")
 	rf.peers = peers
+	rf.ApplicationChanel = applyCh
 	rf.persister = persister
 	rf.me = me
 	rf.EventLogs = make([]LogEntry, 0)
