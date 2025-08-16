@@ -78,6 +78,23 @@ type LogEntry struct {
 	Command interface{}
 }
 
+// RequestVoteArgs structure.
+// field names must start with capital letters!
+type RequestVoteArgs struct {
+	Term         int //current Term on candidate server.
+	CandidateId  int //id of the candidate server.
+	LastLogIndex int //last index the server has filled up in its log.
+	LastLogTerm  int //Term of the item at the last log index.
+}
+
+// RequestVoteReply  structure.
+// field names must start with capital letters!
+type RequestVoteReply struct {
+	// Your data here (3A).
+	Term        int  //CurrentTerm, for candidate to update itself
+	VoteGranted bool //if vote was given or not to the current candidate.
+}
+
 // return CurrentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -148,24 +165,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
-	Term         int //current Term on candidate server.
-	CandidateId  int //id of the candidate server.
-	LastLogIndex int //last index the server has filled up in its log.
-	LastLogTerm  int //Term of the item at the last log index.
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (3A).
-	Term        int  //CurrentTerm, for candidate to update itself
-	VoteGranted bool //if vote was given or not to the current candidate.
-}
-
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -207,12 +206,12 @@ type RequestVoteReply struct {
 // Term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index := rf.CommitIndex
+	term := rf.CurrentTerm
+	isLeader := rf.ServerState == Leader
 	// Your code here (3B).
-
 	return index, term, isLeader
 }
 
@@ -251,43 +250,6 @@ func (rf *Raft) killed() bool {
 //		return
 //	}
 //
-//}
-
-//func (rf *Raft) SendHeartbeat() {
-//	rf.mu.Lock()
-//	if rf.ServerState != Leader {
-//		rf.mu.Unlock()
-//		return
-//	}
-//	me := rf.me
-//	term := rf.CurrentTerm
-//	prevlogindex := len(rf.EventLogs) - 1
-//	prevlogterm := 0
-//	if prevlogindex >= 0 {
-//		prevlogterm = rf.EventLogs[prevlogindex].Term
-//	}
-//	rf.mu.Unlock()
-//	for i := range rf.peers {
-//		if i == rf.me {
-//			continue
-//		}
-//		go func(server int) {
-//			AppendRequest := &AppendEntriesArgs{}
-//			AppendReply := &AppendEntriesReply{}
-//			AppendRequest.Term = term
-//			AppendRequest.LeaderId = me
-//			AppendRequest.PrevLogIndex = prevlogindex
-//			AppendRequest.PrevLogTerm = prevlogterm
-//			AppendRequest.Entries = nil
-//			AppendRequest.LeaderCommit = 0
-//			ok := rf.SendAppendEntries(server, AppendRequest, AppendReply)
-//			if !ok {
-//				log.Println("SendAppendEntries Failed")
-//			} else {
-//				rf.HandleAppendEntries(AppendReply)
-//			}
-//		}(i)
-//	}
 //}
 
 // AppendEntries , this is on the server that is on the receiving end of the RPC.
