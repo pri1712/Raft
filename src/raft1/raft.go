@@ -261,10 +261,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.CurrentTerm
 	isLeader := rf.ServerState == Leader
 	if isLeader {
+		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
 		go rf.SendEventLogs(term, command)
-		if rf.CommitConsensus > len(rf.peers)/2 {
-			rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
-		}
 	}
 	return index, term, isLeader
 }
