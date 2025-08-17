@@ -233,6 +233,7 @@ func (rf *Raft) killed() bool {
 //}
 
 func (rf *Raft) CheckMajorityAcceptance(term int) {
+	log.Printf("CheckMajorityAcceptance: term: %d, majority: %d", term, rf.me)
 	for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
 		if rf.EventLogs[n].Term != term {
 			continue
