@@ -218,6 +218,7 @@ func (rf *Raft) CheckMajorityAcceptance(term int) {
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 	rf.mu.Lock()
 	if rf.CurrentTerm != eventTerm || rf.ServerState != Leader {
+		log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
 		rf.mu.Unlock()
 		return
 	}
