@@ -97,6 +97,13 @@ type RequestVoteReply struct {
 	VoteGranted bool //if vote was given or not to the current candidate.
 }
 
+type DummyArgs struct {
+	Me int
+}
+type DummyReply struct {
+	CommitIndex int
+}
+
 // return CurrentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -235,9 +242,14 @@ func (rf *Raft) CheckMajorityAcceptance(term int) {
 	//log.Printf("CheckMajorityAcceptance: term: %d", term)
 }
 
+func (rf *Raft) GetCommitIndex(args *DummyArgs, reply *DummyReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.CommitIndex = rf.CommitIndex
+}
+
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 	rf.mu.Lock()
-	log.Printf("In sendeventlogs")
 	if rf.CurrentTerm != eventTerm || rf.ServerState != Leader {
 		log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
 		rf.mu.Unlock()
@@ -255,6 +267,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 				continue
 			}
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
+			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
 			prevlogindex := nextindex - 1
 			prevlogterm := 0
 			if prevlogindex >= 0 && prevlogindex < len(rf.EventLogs) {
@@ -262,7 +275,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 			}
 			sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
 			copy(sendEntries, rf.EventLogs[nextindex:])
-			log.Printf("SendEventLogs: %v", sendEntries)
+			//log.Printf("SendEventLogs: %v", sendEntries)
 			request := AppendEntriesArgs{
 				Term:         term,
 				LeaderId:     me,
@@ -278,7 +291,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 					log.Printf("Error while appending entries to server %v", server)
 					return
 				} else {
-					//successfully sent an rpc and got a reply
+					//successfully sent a rpc and got a reply
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
 					if reply.Term > rf.CurrentTerm {
@@ -298,14 +311,15 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 					if reply.Success {
 						log.Printf("Succesfully appended entries to server %v", server)
 						//till what index did we send. from nextindex onwards till the len(sendentries).
-						lastSent := len(sendEntries) + nextindex
+						lastSent := len(sendEntries) + nextindex - 1
 						if lastSent > rf.MatchIndex[server] {
+							//log.Printf("earlier matchindex %v", rf.MatchIndex[server])
 							rf.MatchIndex[server] = lastSent
-							log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
+							//log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
 						}
 						rf.NextIndex[server] = lastSent + 1
-						log.Printf("event logs length: %v", len(rf.EventLogs))
-						log.Printf("Commit index: %v", rf.CommitIndex)
+						//log.Printf("event logs length: %v", len(rf.EventLogs))
+						//log.Printf("Commit index: %v", rf.CommitIndex)
 						for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
 							if rf.EventLogs[n].Term != term {
 								continue
@@ -325,6 +339,24 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 							if count > len(rf.peers)/2 {
 								log.Printf("This entry can now be committed.")
 								rf.CommitIndex = n
+								///
+								//for i := range rf.peers {
+								//	if i == rf.me {
+								//		continue
+								//	}
+								//	dummyreq := &DummyArgs{
+								//		Me: i,
+								//	}
+								//	dummyreply := &DummyReply{}
+								//	ok := rf.peers[i].Call("Raft.GetCommitIndex", dummyreq, dummyreply)
+								//	if ok {
+								//		log.Printf("commit index of peer %v = %v", i, dummyreply.CommitIndex)
+								//	} else {
+								//		log.Printf("failed to get commit index from peer %v", i)
+								//	}
+								//}
+								/////
+								//the issue is that the followers are not commiting their values
 								log.Printf("Commit index: %v", rf.CommitIndex)
 								go rf.SendHeartbeatImmediate()
 							}
@@ -360,9 +392,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.ServerState == Leader
 	if isLeader {
 		index = len(rf.EventLogs)
-		log.Printf("Index is %v", index)
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
-		log.Printf("command %v", command)
 		go rf.SendEventLogs(term, command)
 	} else {
 		return -1, term, false
@@ -393,6 +423,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.LastHeartBeat = time.Now()
 		rf.ServerState = Follower
 		reply.Term = rf.CurrentTerm
+		rf.CommitIndex = args.LeaderCommit
 		reply.Success = true
 	} else {
 		//compare logs here.
@@ -425,15 +456,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				}
 			}
 			log.Printf("Logs match.")
-			log.Printf("Logs %v on server %v", rf.EventLogs, rf.me)
 			lastNewIndex := args.PrevLogIndex + len(args.Entries)
-			log.Printf("leader commit %v", args.LeaderCommit)
+			//log.Printf("leader commit %v", args.LeaderCommit)
 			if args.LeaderCommit > rf.CommitIndex {
 				rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
-				log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
+				//log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
 			}
 			reply.Success = true
-			log.Printf("reply success: %v", reply.Success)
+			//log.Printf("reply success: %v", reply.Success)
 			rf.LastHeartBeat = time.Now()
 			rf.ServerState = Follower
 			go rf.applier()
@@ -484,6 +514,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 	rf.mu.Unlock()
 	for i, _ := range rf.peers {
 		if i == leaderId {
+			//log.Printf("Leader inside sendheartbeatimmediate is: %v", leaderId)
 			continue
 		}
 		//log.Printf("Sending heartbeat to %v", i)
@@ -603,7 +634,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.CurrentTerm
 		//make sure to add log checks here.
 	}
-	log.Printf("Vote granted to %v", args.CandidateId)
+	//log.Printf("Vote granted to %v", args.CandidateId)
 	//return nil
 }
 
@@ -649,9 +680,15 @@ func (rf *Raft) StartElection() {
 func (rf *Raft) applier() {
 	for {
 		rf.mu.Lock()
+		//log.Printf("lastapplied %v < commitindex %v", rf.LastApplied, rf.CommitIndex)
 		for rf.LastApplied < rf.CommitIndex {
 			rf.LastApplied++ //apply one more.
+			log.Printf("Applier last applied %v", rf.LastApplied)
 			idx := rf.LastApplied
+			//log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
+			if idx >= len(rf.EventLogs) {
+				break
+			}
 			command := rf.EventLogs[idx].Command
 			msg := raftapi.ApplyMsg{CommandValid: true, Command: command, CommandIndex: idx}
 			rf.mu.Unlock()
