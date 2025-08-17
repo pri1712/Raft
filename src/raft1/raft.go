@@ -195,6 +195,43 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 
+// the tester doesn't halt goroutines created by Raft after each test,
+// but it does call the Kill() method. your code can use killed() to
+// check whether Kill() has been called. the use of atomic avoids the
+// need for a lock.
+//
+// the issue is that long-running goroutines use memory and may chew
+// up CPU time, perhaps causing later tests to fail and generating
+// confusing debug output. any goroutine with a long-running loop
+// should call killed() to check whether it should stop.
+func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
+	// Your code here, if desired.
+}
+
+func (rf *Raft) killed() bool {
+	z := atomic.LoadInt32(&rf.dead)
+	return z == 1
+}
+
+//func (rf *Raft) HandleAppendEntries(reply *AppendEntriesReply) {
+//	rf.mu.Lock()
+//	term := rf.CurrentTerm
+//	isLeader := rf.ServerState == Leader
+//	if reply.Term > term || !isLeader {
+//		rf.CurrentTerm = reply.Term
+//		rf.VotedFor = -1
+//		rf.ServerState = Follower
+//		rf.VoteCount = 0
+//	} else {
+//		//if the success is set to true, its fine. just updates logs and stuff.
+//		//if success is false, got to fid the previous matching Term in the log of this server and the
+//		//leader.
+//		return
+//	}
+//
+//}
+
 func (rf *Raft) CheckMajorityAcceptance(term int) {
 	for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
 		if rf.EventLogs[n].Term != term {
@@ -208,6 +245,7 @@ func (rf *Raft) CheckMajorityAcceptance(term int) {
 				count++
 			}
 		}
+		log.Printf("CheckMajorityAcceptance: term: %d, count: %d", term, count)
 		if count > len(rf.peers)/2 {
 			log.Printf("This entry can now be committed.")
 			rf.CommitIndex = n
@@ -217,6 +255,7 @@ func (rf *Raft) CheckMajorityAcceptance(term int) {
 
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 	rf.mu.Lock()
+	log.Printf("In sendeventlogs")
 	if rf.CurrentTerm != eventTerm || rf.ServerState != Leader {
 		log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
 		rf.mu.Unlock()
@@ -227,7 +266,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 	commitIndex := rf.CommitIndex
 	term := rf.CurrentTerm
 	peers := rf.peers
-
+	rf.mu.Unlock()
 	if isLeader {
 		for server := range peers {
 			if me == server {
@@ -241,6 +280,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 			}
 			sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
 			copy(sendEntries, rf.EventLogs[nextindex:])
+			log.Printf("SendEventLogs: %v", sendEntries)
 			request := AppendEntriesArgs{
 				Term:         term,
 				LeaderId:     me,
@@ -279,6 +319,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 						lastSent := len(sendEntries) + nextindex
 						if lastSent > rf.MatchIndex[server] {
 							rf.MatchIndex[server] = lastSent
+							log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
 						}
 						rf.NextIndex[server] = lastSent + 1
 						rf.CheckMajorityAcceptance(rf.CurrentTerm)
@@ -291,50 +332,6 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 			}(server, request)
 		}
 	}
-	//if isLeader {
-	//	//send out append entry RPC
-	//	rf.mu.Lock()
-	//	for i := range rf.peers {
-	//		if i == rf.me {
-	//			continue
-	//		}
-	//		go func(server int) {
-	//			prevlogindex := rf.NextIndex[server] - 1
-	//			prevlogterm := 0
-	//			if prevlogindex >= 0 {
-	//				prevlogterm = rf.EventLogs[prevlogindex].Term
-	//			}
-	//			var sendentry []LogEntry
-	//			for e := range rf.EventLogs {
-	//				sendentry = make([]LogEntry, len(rf.EventLogs[:]))
-	//			}
-	//			localRequest := AppendEntriesArgs{
-	//				Term:         term,
-	//				LeaderId:     rf.me,
-	//				PrevLogIndex: prevlogindex,
-	//				PrevLogTerm:  prevlogterm,
-	//				Entries:      []LogEntry{{Term: term, Command: command}},
-	//				LeaderCommit: rf.CommitIndex,
-	//			}
-	//			localReply := AppendEntriesReply{}
-	//			ok := rf.peers[server].Call("AppendEntries", &localRequest, &localReply)
-	//			if !ok {
-	//				log.Printf("Append entries failed in server %v", server)
-	//			} else {
-	//				if localReply.Term > rf.CurrentTerm {
-	//					rf.CurrentTerm = localReply.Term
-	//					rf.ServerState = Follower
-	//					rf.VotedFor = -1
-	//					rf.VoteCount = 0
-	//				} else if !localReply.Success {
-	//					//gotta do log correction now for the server that has mismatched logs.
-	//				}
-	//			}
-	//		}(i)
-	//	}
-	//	rf.mu.Unlock()
-	//}
-
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -356,50 +353,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.CurrentTerm
 	isLeader := rf.ServerState == Leader
 	if isLeader {
-		log.Printf("Leader is %v", rf.me)
 		index = len(rf.EventLogs)
+		log.Printf("Index is %v", index)
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
+		log.Printf("command %v", command)
 		go rf.SendEventLogs(term, command)
 	}
 	return index, term, isLeader
 }
-
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-//
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-}
-
-func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
-}
-
-//func (rf *Raft) HandleAppendEntries(reply *AppendEntriesReply) {
-//	rf.mu.Lock()
-//	term := rf.CurrentTerm
-//	isLeader := rf.ServerState == Leader
-//	if reply.Term > term || !isLeader {
-//		rf.CurrentTerm = reply.Term
-//		rf.VotedFor = -1
-//		rf.ServerState = Follower
-//		rf.VoteCount = 0
-//	} else {
-//		//if the success is set to true, its fine. just updates logs and stuff.
-//		//if success is false, got to fid the previous matching Term in the log of this server and the
-//		//leader.
-//		return
-//	}
-//
-//}
 
 // AppendEntries , this is on the server that is on the receiving end of the RPC.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -418,7 +379,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 	}
-	if args.Entries == nil {
+	if len(args.Entries) == 0 {
 		//heartbeat
 		rf.LastHeartBeat = time.Now()
 		rf.ServerState = Follower
@@ -427,16 +388,43 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		//compare logs here.
 		log.Printf("prevlogterm and prevlogindex %v and %v", args.PrevLogTerm, args.PrevLogIndex)
+		if args.PrevLogIndex >= len(rf.EventLogs) {
+			reply.Success = false
+			reply.Term = rf.CurrentTerm
+			return
+		}
 		if args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm {
 			//logs are not matching at prev log index, have to keep sending older logs till we get replicated logs.
+			log.Printf("Logs dont match.")
 			reply.Success = false
+			reply.Term = rf.CurrentTerm
 			return
 		} else {
 			//loop through the entries field and append all to logs.
-			for i := range args.Entries {
-				rf.EventLogs = append(rf.EventLogs, args.Entries[i])
+			//first gotta replace the wrong logs
+			startidx := args.PrevLogIndex + 1
+			for i, entry := range args.Entries {
+				if startidx+i < len(rf.EventLogs) {
+					//logs exist in the follower where we are trying to insert.
+					if rf.EventLogs[startidx+i].Term != entry.Term {
+						//wrong log exists.
+						rf.EventLogs = rf.EventLogs[:startidx+i]
+						rf.EventLogs = append(rf.EventLogs, entry)
+					}
+				} else {
+					rf.EventLogs = append(rf.EventLogs, entry)
+				}
+			}
+			log.Printf("Logs match.")
+			log.Printf("Logs %v on server %v", rf.EventLogs, rf.me)
+			lastNewIndex := args.PrevLogIndex + len(args.Entries)
+			log.Printf("leader commit %v", args.LeaderCommit)
+			if args.LeaderCommit > rf.CommitIndex {
+				rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
+				log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
 			}
 			reply.Success = true
+			log.Printf("reply success: %v", reply.Success)
 			rf.LastHeartBeat = time.Now()
 			rf.ServerState = Follower
 			reply.Term = rf.CurrentTerm
@@ -461,13 +449,13 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	}
 	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
-	log.Printf("Sending AppendEntries to %v", server)
+	//log.Printf("Sending AppendEntries to %v", server)
 	//log.Printf("peers: %v", rf.peers[server])
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, reply)
 	if !ok {
 		log.Printf("AppendEntries failed for server %d", server)
 	} else {
-		log.Printf("AppendEntries for server %d", server)
+		//log.Printf("AppendEntries for server %d", server)
 	}
 }
 
@@ -485,7 +473,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 		if i == leaderId {
 			continue
 		}
-		log.Printf("Sending heartbeat to %v", i)
+		//log.Printf("Sending heartbeat to %v", i)
 		go rf.SendHeartBeatToPeers(i, term, leaderId) //send concurrently to increase speed.
 	}
 
@@ -496,7 +484,7 @@ func (rf *Raft) PeriodicHeartbeats() {
 	heartbeatInterval := 100 * time.Millisecond
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
-	log.Printf("Heartbeat periodic every %v", heartbeatInterval)
+	//log.Printf("Heartbeat periodic every %v", heartbeatInterval)
 	//when just became a leader send it right away.
 	rf.SendHeartbeatImmediate()
 	for {
@@ -505,12 +493,12 @@ func (rf *Raft) PeriodicHeartbeats() {
 		case <-ticker.C:
 			rf.mu.Lock()
 			if rf.ServerState != Leader {
-				log.Printf("%v is no longer a leader and cant send out heartbeats", rf.me)
+				//log.Printf("%v is no longer a leader and cant send out heartbeats", rf.me)
 				rf.mu.Unlock()
 				return
 			}
 			rf.mu.Unlock()
-			log.Printf("Sending out heartbeats now")
+			//log.Printf("Sending out heartbeats now")
 			rf.SendHeartbeatImmediate()
 		}
 	}
@@ -548,19 +536,19 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 
 // RequestVote example RequestVote RPC handler.This is implemented on the servers receiving the RPC
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	log.Printf("In requesting vote")
+	//log.Printf("In requesting vote")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("RequestVote", rf.me)
 	defer rf.mu.Unlock()
 	reply.VoteGranted = false
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
-		log.Printf("Term of candidate %d cannot be less than current Term %d\n", args.Term, rf.CurrentTerm)
+		//log.Printf("Term of candidate %d cannot be less than current Term %d\n", args.Term, rf.CurrentTerm)
 		return
 		//return nil
 	}
 	if args.Term > rf.CurrentTerm {
-		log.Printf("Server %d updating term from %d to %d, becoming follower", rf.me, rf.CurrentTerm, args.Term)
+		//log.Printf("Server %d updating term from %d to %d, becoming follower", rf.me, rf.CurrentTerm, args.Term)
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
 		rf.ServerState = Follower
@@ -725,13 +713,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.CurrentTerm = 0
 	rf.ServerState = Follower
 	rf.ElectionTimeout = time.Duration(rand.Intn(MaxTime-MinTime+1)+MinTime) * time.Millisecond
-	log.Printf("Timeout is: %v", rf.ElectionTimeout)
+	//log.Printf("Timeout is: %v", rf.ElectionTimeout)
 	rf.CommitIndex = 0
 	rf.LastApplied = 0
 	//log.Printf("length of peers: %v", len(rf.peers))
 	rf.NextIndex = make([]int, len(rf.peers))
 	rf.MatchIndex = make([]int, len(rf.peers))
-	log.Printf("len of nextIndex: %v", len(rf.NextIndex))
+	//log.Printf("len of nextIndex: %v", len(rf.NextIndex))
 	rf.LastHeartBeat = time.Now()
 	rf.StopHeartBeat = make(chan bool, 1)
 	// initialize from ServerState persisted before a crash
