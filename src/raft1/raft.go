@@ -208,7 +208,6 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
-
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
@@ -312,7 +311,6 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 								continue
 							}
 							count := 1
-							log.Printf("CheckMajorityAcceptance: count: %d", count)
 							for i := range rf.peers {
 								if i == rf.me {
 									continue
@@ -327,6 +325,8 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 							if count > len(rf.peers)/2 {
 								log.Printf("This entry can now be committed.")
 								rf.CommitIndex = n
+								log.Printf("Commit index: %v", rf.CommitIndex)
+								go rf.SendHeartbeatImmediate()
 							}
 						}
 					} else {
@@ -436,6 +436,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			log.Printf("reply success: %v", reply.Success)
 			rf.LastHeartBeat = time.Now()
 			rf.ServerState = Follower
+			go rf.applier()
 			reply.Term = rf.CurrentTerm
 		}
 	}
@@ -448,13 +449,15 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 		rf.mu.Unlock()
 		return
 	}
+	prevlogindex := len(rf.EventLogs) - 1
+	prevlogterm := rf.EventLogs[prevlogindex].Term
 	request := &AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     leaderId,
-		PrevLogIndex: 0,
-		PrevLogTerm:  0,
+		PrevLogIndex: prevlogindex,
+		PrevLogTerm:  prevlogterm,
 		Entries:      nil,
-		LeaderCommit: 0,
+		LeaderCommit: rf.CommitIndex,
 	}
 	rf.mu.Unlock()
 	reply := &AppendEntriesReply{}
@@ -470,6 +473,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 
 func (rf *Raft) SendHeartbeatImmediate() {
 	rf.mu.Lock()
+	//log.Printf("SendHeartbeatImmediate")
 	defer utils.RecoverWithStackTrace("SendHeartbeatImmediate", rf.me)
 	if rf.ServerState != Leader {
 		rf.mu.Unlock()
@@ -642,7 +646,23 @@ func (rf *Raft) StartElection() {
 		}(i)
 	}
 }
-
+func (rf *Raft) applier() {
+	for {
+		rf.mu.Lock()
+		for rf.LastApplied < rf.CommitIndex {
+			rf.LastApplied++ //apply one more.
+			idx := rf.LastApplied
+			command := rf.EventLogs[idx].Command
+			msg := raftapi.ApplyMsg{CommandValid: true, Command: command, CommandIndex: idx}
+			rf.mu.Unlock()
+			rf.ApplicationChanel <- msg //send it into the channel to be read by the applicn.
+			rf.mu.Lock()
+		}
+		rf.mu.Unlock()
+		ms := 50 + (rand.Int63() % 300)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
+}
 func (rf *Raft) ticker() {
 	//code necessary for 3A
 	for rf.killed() == false {
@@ -736,6 +756,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 	//go rf.SendHeartbeats()
 	//log.Printf("Methods on *Raft: %+v", reflect.TypeOf(rf))
 	//for i := 0; i < reflect.TypeOf(rf).NumMethod(); i++ {
