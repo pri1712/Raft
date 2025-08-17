@@ -233,25 +233,7 @@ func (rf *Raft) killed() bool {
 //}
 
 func (rf *Raft) CheckMajorityAcceptance(term int) {
-	log.Printf("CheckMajorityAcceptance: term: %d, majority: %d", term, rf.me)
-	for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
-		if rf.EventLogs[n].Term != term {
-			continue
-		}
-		count := 1
-		for i := range rf.peers {
-			if rf.MatchIndex[i] >= n {
-				//if the current terms entries have been replicated the matchindex would be more than the index of
-				//current term.
-				count++
-			}
-		}
-		log.Printf("CheckMajorityAcceptance: term: %d, count: %d", term, count)
-		if count > len(rf.peers)/2 {
-			log.Printf("This entry can now be committed.")
-			rf.CommitIndex = n
-		}
-	}
+	//log.Printf("CheckMajorityAcceptance: term: %d", term)
 }
 
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
@@ -323,7 +305,30 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 							log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
 						}
 						rf.NextIndex[server] = lastSent + 1
-						rf.CheckMajorityAcceptance(rf.CurrentTerm)
+						log.Printf("event logs length: %v", len(rf.EventLogs))
+						log.Printf("Commit index: %v", rf.CommitIndex)
+						for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
+							if rf.EventLogs[n].Term != term {
+								continue
+							}
+							count := 1
+							log.Printf("CheckMajorityAcceptance: count: %d", count)
+							for i := range rf.peers {
+								if i == rf.me {
+									continue
+								}
+								if rf.MatchIndex[i] >= n {
+									//if the current terms entries have been replicated the matchindex would be more than the index of
+									//current term.
+									count++
+								}
+							}
+							log.Printf("CheckMajorityAcceptance: term: %d, count: %d", term, count)
+							if count > len(rf.peers)/2 {
+								log.Printf("This entry can now be committed.")
+								rf.CommitIndex = n
+							}
+						}
 					} else {
 						if rf.NextIndex[server] > 0 {
 							rf.NextIndex[server]-- //backoff and send again.
@@ -359,8 +364,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
 		log.Printf("command %v", command)
 		go rf.SendEventLogs(term, command)
+	} else {
+		return -1, term, false
 	}
 	return index, term, isLeader
+
 }
 
 // AppendEntries , this is on the server that is on the receiving end of the RPC.
@@ -709,7 +717,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.ApplicationChanel = applyCh
 	rf.persister = persister
 	rf.me = me
-	rf.EventLogs = make([]LogEntry, 0)
+	rf.EventLogs = make([]LogEntry, 1)
+	rf.EventLogs[0] = LogEntry{Term: 0, Command: nil}
 	rf.VotedFor = -1
 	rf.CurrentTerm = 0
 	rf.ServerState = Follower
