@@ -107,11 +107,11 @@ type DummyReply struct {
 // return CurrentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	utils.RecoverWithStackTrace("GetState", rf.me)
 	var term int
 	var isleader bool
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	// Your code here (3A).
 	term = rf.CurrentTerm
 	if rf.ServerState == Leader {
@@ -251,7 +251,7 @@ func (rf *Raft) GetCommitIndex(args *DummyArgs, reply *DummyReply) {
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 	rf.mu.Lock()
 	if rf.CurrentTerm != eventTerm || rf.ServerState != Leader {
-		log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
+		//log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
 		rf.mu.Unlock()
 		return
 	}
@@ -266,6 +266,11 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 			if me == server {
 				continue
 			}
+			rf.mu.Lock()
+			if rf.ServerState != Leader || rf.CurrentTerm != eventTerm {
+				rf.mu.Unlock()
+				return
+			}
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
 			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
 			prevlogindex := nextindex - 1
@@ -275,7 +280,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 			}
 			sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
 			copy(sendEntries, rf.EventLogs[nextindex:])
-			//log.Printf("SendEventLogs: %v", sendEntries)
+			log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
 			request := AppendEntriesArgs{
 				Term:         term,
 				LeaderId:     me,
@@ -284,6 +289,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 				Entries:      sendEntries,
 				LeaderCommit: commitIndex,
 			}
+			rf.mu.Unlock()
 			go func(server int, request AppendEntriesArgs) {
 				reply := AppendEntriesReply{}
 				ok := rf.peers[server].Call("Raft.AppendEntries", &request, &reply)
@@ -318,7 +324,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 							//log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
 						}
 						rf.NextIndex[server] = lastSent + 1
-						//log.Printf("event logs length: %v", len(rf.EventLogs))
+						//log.Printf("event logs length for server %v : %v", rf.me, len(rf.EventLogs))
 						//log.Printf("Commit index: %v", rf.CommitIndex)
 						for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
 							if rf.EventLogs[n].Term != term {
@@ -339,31 +345,15 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 							if count > len(rf.peers)/2 {
 								log.Printf("This entry can now be committed.")
 								rf.CommitIndex = n
-								///
-								//for i := range rf.peers {
-								//	if i == rf.me {
-								//		continue
-								//	}
-								//	dummyreq := &DummyArgs{
-								//		Me: i,
-								//	}
-								//	dummyreply := &DummyReply{}
-								//	ok := rf.peers[i].Call("Raft.GetCommitIndex", dummyreq, dummyreply)
-								//	if ok {
-								//		log.Printf("commit index of peer %v = %v", i, dummyreply.CommitIndex)
-								//	} else {
-								//		log.Printf("failed to get commit index from peer %v", i)
-								//	}
-								//}
-								/////
-								//the issue is that the followers are not commiting their values
 								log.Printf("Commit index: %v", rf.CommitIndex)
 								go rf.SendHeartbeatImmediate()
 							}
 						}
 					} else {
 						if rf.NextIndex[server] > 0 {
+							log.Printf("server that needs a higher term is %v", server)
 							rf.NextIndex[server]-- //backoff and send again.
+							log.Printf("Next index of server that needs a higher term: %v", rf.NextIndex[server])
 						}
 					}
 				}
@@ -466,8 +456,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//log.Printf("reply success: %v", reply.Success)
 			rf.LastHeartBeat = time.Now()
 			rf.ServerState = Follower
-			go rf.applier()
 			reply.Term = rf.CurrentTerm
+			log.Printf("Logs of server %v are : %v", rf.me, rf.EventLogs)
+			go rf.applier()
 		}
 	}
 }
@@ -495,7 +486,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	//log.Printf("peers: %v", rf.peers[server])
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, reply)
 	if !ok {
-		log.Printf("AppendEntries failed for server %d", server)
+		//log.Printf("AppendEntries failed for server %d", server)
 	} else {
 		//log.Printf("AppendEntries for server %d", server)
 	}
