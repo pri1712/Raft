@@ -436,79 +436,70 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // AppendEntries , this is on the server that is on the receiving end of the RPC.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//log.Printf("In appendentries")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("AppendEntries", rf.me)
 	defer rf.mu.Unlock()
+
+	reply.Term = rf.CurrentTerm
 	reply.Success = false
-	//log.Printf("AppendEntries for server in func AppendEntries %d", rf.me)
-	//if the heartbeat server has a lower term than this server, step down.
+
+	// Term checks
 	if args.Term < rf.CurrentTerm {
-		reply.Term = rf.CurrentTerm
 		return
-	} else if args.Term > rf.CurrentTerm {
+	}
+	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 	}
-	lastNewIndex := args.PrevLogIndex + len(args.Entries)
-	if args.LeaderCommit > rf.CommitIndex {
-		rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
+
+	// CONSISTENCY CHECK (applies to heartbeats too)
+	// PrevLogIndex must exist and match PrevLogTerm
+	if args.PrevLogIndex >= len(rf.EventLogs) || (args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		// follower missing prev or term mismatch -> reject
 		return
 	}
-	if len(args.Entries) == 0 {
-		//heartbeat
-		rf.LastHeartBeat = time.Now()
-		rf.ServerState = Follower
-		reply.Term = rf.CurrentTerm
 
-		reply.Success = true
-	} else {
-		//compare logs here.
-		log.Printf("prevlogterm and prevlogindex %v and %v", args.PrevLogTerm, args.PrevLogIndex)
-		if args.PrevLogIndex >= len(rf.EventLogs) {
-			reply.Success = false
-			reply.Term = rf.CurrentTerm
-			return
-		}
-		if args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm {
-			//logs are not matching at prev log index, have to keep sending older logs till we get replicated logs.
-			log.Printf("Logs dont match.")
-			reply.Success = false
-			reply.Term = rf.CurrentTerm
-			return
-		} else {
-			//loop through the entries field and append all to logs.
-			//first gotta replace the wrong logs
-			startidx := args.PrevLogIndex + 1
-			for i, entry := range args.Entries {
-				if startidx+i < len(rf.EventLogs) {
-					//logs exist in the follower where we are trying to insert.
-					if rf.EventLogs[startidx+i].Term != entry.Term {
-						//wrong log exists.
-						rf.EventLogs = rf.EventLogs[:startidx+i]
-						rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
-						break
-					}
-				} else {
+	// Append / overwrite any new entries
+	insert := args.PrevLogIndex + 1
+	if len(args.Entries) > 0 {
+		// find first conflict; truncate once then append rest
+		conflictFound := false
+		for i := 0; i < len(args.Entries); i++ {
+			if insert+i < len(rf.EventLogs) {
+				if rf.EventLogs[insert+i].Term != args.Entries[i].Term {
+					rf.EventLogs = rf.EventLogs[:insert+i]
 					rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+					conflictFound = true
 					break
 				}
+			} else {
+				rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+				conflictFound = true
+				break
 			}
-			log.Printf("Logs match.")
-			lastNewIndex := args.PrevLogIndex + len(args.Entries)
-			//log.Printf("leader commit %v", args.LeaderCommit)
-			if args.LeaderCommit > rf.CommitIndex {
-				rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
-				log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
-			}
-			reply.Success = true
-			//log.Printf("reply success: %v", reply.Success)
-			rf.LastHeartBeat = time.Now()
-			rf.ServerState = Follower
-			reply.Term = rf.CurrentTerm
+		}
+		if !conflictFound {
+			// entries were already present and matched; nothing to append
 		}
 	}
+
+	// Update follower's commit index, but never beyond lastNewIndex (the last index the follower actually has)
+	lastNewIndex := args.PrevLogIndex + len(args.Entries)
+	if args.LeaderCommit > rf.CommitIndex {
+		if lastNewIndex < args.LeaderCommit {
+			rf.CommitIndex = lastNewIndex
+		} else {
+			rf.CommitIndex = args.LeaderCommit
+		}
+	}
+
+	// heartbeat / reset election timer
+	rf.LastHeartBeat = time.Now()
+	rf.ServerState = Follower
+
+	reply.Success = true
+	reply.Term = rf.CurrentTerm
 }
 
 func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
