@@ -238,14 +238,57 @@ func (rf *Raft) killed() bool {
 //
 //}
 
-func (rf *Raft) CheckMajorityAcceptance(term int) {
-	//log.Printf("CheckMajorityAcceptance: term: %d", term)
-}
-
 func (rf *Raft) GetCommitIndex(args *DummyArgs, reply *DummyReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.CommitIndex = rf.CommitIndex
+}
+
+func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
+	for {
+		rf.mu.Lock()
+		if rf.ServerState != Leader || rf.CurrentTerm != term {
+			log.Printf("for server: %v", rf.me)
+			log.Printf("Replicatelogs go routine failed.")
+			rf.mu.Unlock()
+			return
+		}
+		nextIndex := rf.NextIndex[server]
+		prevlogindex := nextIndex - 1
+		prevlogterm := 0
+		if prevlogindex >= 0 {
+			prevlogterm = rf.EventLogs[prevlogindex].Term
+		}
+		entries := rf.EventLogs[nextIndex:]
+		request := &AppendEntriesArgs{
+			Term:         term,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevlogindex,
+			PrevLogTerm:  prevlogterm,
+			Entries:      entries,
+			LeaderCommit: rf.CommitIndex,
+		}
+		rf.mu.Unlock()
+		reply := &AppendEntriesReply{}
+		ok := rf.peers[server].Call("Raft.AppendEntries", request, reply)
+		if ok {
+			rf.mu.Lock()
+			if reply.Success {
+				rf.NextIndex[server] = nextIndex + len(entries)
+				rf.MatchIndex[server] = rf.NextIndex[server] - 1
+			} else {
+				if rf.NextIndex[server] > 1 {
+					log.Printf("for server: %v", rf.me)
+					rf.NextIndex[server]--
+					log.Printf("rf.NextIndex[server]: %v", rf.NextIndex[server])
+				}
+			}
+			rf.mu.Unlock()
+			ms := 50 + (rand.Int63() % 300)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+	}
+
 }
 
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
@@ -280,7 +323,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 			}
 			sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
 			copy(sendEntries, rf.EventLogs[nextindex:])
-			log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
+			//log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
 			request := AppendEntriesArgs{
 				Term:         term,
 				LeaderId:     me,
@@ -408,12 +451,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 	}
+	lastNewIndex := args.PrevLogIndex + len(args.Entries)
+	if args.LeaderCommit > rf.CommitIndex {
+		rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
+		return
+	}
 	if len(args.Entries) == 0 {
 		//heartbeat
 		rf.LastHeartBeat = time.Now()
 		rf.ServerState = Follower
 		reply.Term = rf.CurrentTerm
-		rf.CommitIndex = args.LeaderCommit
+
 		reply.Success = true
 	} else {
 		//compare logs here.
@@ -439,10 +487,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					if rf.EventLogs[startidx+i].Term != entry.Term {
 						//wrong log exists.
 						rf.EventLogs = rf.EventLogs[:startidx+i]
-						rf.EventLogs = append(rf.EventLogs, entry)
+						rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+						break
 					}
 				} else {
-					rf.EventLogs = append(rf.EventLogs, entry)
+					rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+					break
 				}
 			}
 			log.Printf("Logs match.")
@@ -450,15 +500,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//log.Printf("leader commit %v", args.LeaderCommit)
 			if args.LeaderCommit > rf.CommitIndex {
 				rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
-				//log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
+				log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
 			}
 			reply.Success = true
 			//log.Printf("reply success: %v", reply.Success)
 			rf.LastHeartBeat = time.Now()
 			rf.ServerState = Follower
 			reply.Term = rf.CurrentTerm
-			log.Printf("Logs of server %v are : %v", rf.me, rf.EventLogs)
-			go rf.applier()
 		}
 	}
 }
@@ -562,6 +610,11 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 				//log.Printf("len of eventLogs: %v", len(rf.EventLogs))
 				rf.NextIndex[i] = len(rf.EventLogs)
 				rf.MatchIndex[i] = 0
+				if i == rf.me {
+					rf.MatchIndex[i] = len(rf.EventLogs) - 1
+					continue
+				}
+				go rf.ReplicateLogsToFollower(i, rf.CurrentTerm)
 			}
 			log.Printf("Server %d became leader for term %d", rf.me, rf.CurrentTerm)
 			go rf.PeriodicHeartbeats()
@@ -669,22 +722,22 @@ func (rf *Raft) StartElection() {
 	}
 }
 func (rf *Raft) applier() {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
-		//log.Printf("lastapplied %v < commitindex %v", rf.LastApplied, rf.CommitIndex)
+		log.Printf("lastapplied %v < commitindex %v on server %v ", rf.LastApplied, rf.CommitIndex, rf.me)
 		for rf.LastApplied < rf.CommitIndex {
-			rf.LastApplied++ //apply one more.
+			nextidx := rf.LastApplied + 1
 			log.Printf("Applier last applied %v", rf.LastApplied)
-			idx := rf.LastApplied
-			//log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
-			if idx >= len(rf.EventLogs) {
+			log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
+			if nextidx >= len(rf.EventLogs) {
 				break
 			}
-			command := rf.EventLogs[idx].Command
-			msg := raftapi.ApplyMsg{CommandValid: true, Command: command, CommandIndex: idx}
+			command := rf.EventLogs[nextidx].Command
+			msg := raftapi.ApplyMsg{CommandValid: true, Command: command, CommandIndex: nextidx}
 			rf.mu.Unlock()
 			rf.ApplicationChanel <- msg //send it into the channel to be read by the applicn.
 			rf.mu.Lock()
+			rf.LastApplied = nextidx
 		}
 		rf.mu.Unlock()
 		ms := 50 + (rand.Int63() % 300)
