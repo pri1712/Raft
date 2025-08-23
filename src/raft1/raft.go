@@ -247,7 +247,7 @@ func (rf *Raft) GetCommitIndex(args *DummyArgs, reply *DummyReply) {
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 	for {
 		rf.mu.Lock()
-		if rf.ServerState != Leader || rf.CurrentTerm != term {
+		if rf.ServerState != Leader || rf.CurrentTerm != term || rf.killed() {
 			log.Printf("for server: %v", rf.me)
 			log.Printf("Replicatelogs go routine failed.")
 			rf.mu.Unlock()
@@ -259,20 +259,14 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 		if prevlogindex >= 0 {
 			prevlogterm = rf.EventLogs[prevlogindex].Term
 		}
-		entries := rf.EventLogs[nextIndex:]
-		var entriesCopy []LogEntry
-		if nextIndex < len(rf.EventLogs) {
-			entriesCopy = make([]LogEntry, len(rf.EventLogs)-nextIndex)
-			copy(entriesCopy, rf.EventLogs[nextIndex:])
-		} else {
-			entriesCopy = nil
-		}
+		entries := make([]LogEntry, len(rf.EventLogs[nextIndex:]))
+		copy(entries, rf.EventLogs[nextIndex:])
 		request := &AppendEntriesArgs{
 			Term:         term,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevlogindex,
 			PrevLogTerm:  prevlogterm,
-			Entries:      entriesCopy,
+			Entries:      entries,
 			LeaderCommit: rf.CommitIndex,
 		}
 		rf.mu.Unlock()
@@ -391,7 +385,7 @@ func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 									count++
 								}
 							}
-							//log.Printf("CheckMajorityAcceptance: term: %d, count: %d", term, count)
+							log.Printf("CheckMajorityAcceptance: term: %d, count: %d", term, count)
 							if count > len(rf.peers)/2 {
 								log.Printf("This entry can now be committed.")
 								rf.CommitIndex = n
@@ -443,74 +437,70 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // AppendEntries , this is on the server that is on the receiving end of the RPC.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//log.Printf("In appendentries")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("AppendEntries", rf.me)
 	defer rf.mu.Unlock()
-	reply.Success = false
+
 	reply.Term = rf.CurrentTerm
-	//log.Printf("AppendEntries for server in func AppendEntries %d", rf.me)
-	//if the heartbeat server has a lower term than this server, step down.
+	reply.Success = false
+
+	// Term checks
 	if args.Term < rf.CurrentTerm {
 		return
-	} else if args.Term > rf.CurrentTerm {
+	}
+	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 	}
+
+	// CONSISTENCY CHECK (applies to heartbeats too)
+	// PrevLogIndex must exist and match PrevLogTerm
 	if args.PrevLogIndex >= len(rf.EventLogs) || (args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		// follower missing prev or term mismatch -> reject
 		return
 	}
-	if len(args.Entries) == 0 {
-		//heartbeat
-		rf.LastHeartBeat = time.Now()
-		rf.ServerState = Follower
-		reply.Term = rf.CurrentTerm
-		reply.Success = true
-		lastNewIndex := args.PrevLogIndex
-		if args.LeaderCommit > rf.CommitIndex {
-			//need to update
-			rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
-			log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
-		}
-	} else {
-		//compare logs here.
-		log.Printf("prevlogterm and prevlogindex %v and %v", args.PrevLogTerm, args.PrevLogIndex)
 
-		//loop through the entries field and append all to logs.
-		//first gotta replace the wrong logs
-		startidx := args.PrevLogIndex + 1
-		logConflict := false
+	// Append / overwrite any new entries
+	insert := args.PrevLogIndex + 1
+	if len(args.Entries) > 0 {
+		// find first conflict; truncate once then append rest
+		conflictFound := false
 		for i := 0; i < len(args.Entries); i++ {
-			if startidx+i < len(rf.EventLogs) {
-				//logs exist in the follower where we are trying to insert.
-				if rf.EventLogs[startidx+i].Term != args.Entries[i].Term {
-					//wrong log exists.
-					rf.EventLogs = rf.EventLogs[:startidx+i]
+			if insert+i < len(rf.EventLogs) {
+				if rf.EventLogs[insert+i].Term != args.Entries[i].Term {
+					rf.EventLogs = rf.EventLogs[:insert+i]
 					rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
-					logConflict = true
+					conflictFound = true
 					break
 				}
 			} else {
 				rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
-				logConflict = true
+				conflictFound = true
 				break
 			}
 		}
-		if !logConflict {
-			log.Printf("No log conflict found")
+		if !conflictFound {
+			// entries were already present and matched; nothing to append
 		}
-		lastNewIndex := args.PrevLogIndex + len(args.Entries)
-		//log.Printf("leader commit %v", args.LeaderCommit)
-		if args.LeaderCommit > rf.CommitIndex {
-			rf.CommitIndex = min(args.LeaderCommit, lastNewIndex)
-			log.Printf("Commit index on server %v is %v", rf.me, rf.CommitIndex)
-		}
-		reply.Success = true
-		rf.LastHeartBeat = time.Now()
-		rf.ServerState = Follower
-		reply.Term = rf.CurrentTerm
 	}
+
+	// Update follower's commit index, but never beyond lastNewIndex (the last index the follower actually has)
+	lastNewIndex := args.PrevLogIndex + len(args.Entries)
+	if args.LeaderCommit > rf.CommitIndex {
+		if lastNewIndex < args.LeaderCommit {
+			rf.CommitIndex = lastNewIndex
+		} else {
+			rf.CommitIndex = args.LeaderCommit
+		}
+	}
+
+	// heartbeat / reset election timer
+	rf.LastHeartBeat = time.Now()
+	rf.ServerState = Follower
+
+	reply.Success = true
+	reply.Term = rf.CurrentTerm
 }
 
 func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
@@ -730,16 +720,16 @@ func (rf *Raft) applier() {
 		for rf.LastApplied < rf.CommitIndex {
 			nextidx := rf.LastApplied + 1
 			log.Printf("Applier last applied %v", rf.LastApplied)
-			//log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
+			log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
 			if nextidx >= len(rf.EventLogs) {
 				break
 			}
 			command := rf.EventLogs[nextidx].Command
 			msg := raftapi.ApplyMsg{CommandValid: true, Command: command, CommandIndex: nextidx}
-			rf.LastApplied = nextidx
 			rf.mu.Unlock()
 			rf.ApplicationChanel <- msg //send it into the channel to be read by the applicn.
 			rf.mu.Lock()
+			rf.LastApplied = nextidx
 		}
 		rf.mu.Unlock()
 		ms := 50 + (rand.Int63() % 300)
