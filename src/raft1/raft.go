@@ -245,7 +245,7 @@ func (rf *Raft) killed() bool {
 //}
 
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.CurrentTerm != term || rf.ServerState != Leader {
 			//log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
@@ -255,107 +255,101 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 		isLeader := rf.ServerState == Leader
 		me := rf.me
 		commitIndex := rf.CommitIndex
-		term := rf.CurrentTerm
-		peers := rf.peers
+		currentTerm := term
 		rf.mu.Unlock()
 		if isLeader {
-			for server := range peers {
-				if me == server {
-					continue
-				}
-				rf.mu.Lock()
-				if rf.ServerState != Leader || rf.CurrentTerm != term {
-					rf.mu.Unlock()
-					return
-				}
-				nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
-				//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
-				prevlogindex := nextindex - 1
-				prevlogterm := 0
-				if prevlogindex >= 0 && prevlogindex < len(rf.EventLogs) {
-					prevlogterm = rf.EventLogs[prevlogindex].Term
-				}
-				sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
-				copy(sendEntries, rf.EventLogs[nextindex:])
-				//log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
-				request := AppendEntriesArgs{
-					Term:         term,
-					LeaderId:     me,
-					PrevLogIndex: prevlogindex,
-					PrevLogTerm:  prevlogterm,
-					Entries:      sendEntries,
-					LeaderCommit: commitIndex,
-				}
+			rf.mu.Lock()
+			if rf.ServerState != Leader || rf.CurrentTerm != currentTerm {
 				rf.mu.Unlock()
-				go func(server int, request AppendEntriesArgs) {
-					reply := AppendEntriesReply{}
-					ok := rf.peers[server].Call("Raft.AppendEntries", &request, &reply)
-					if !ok {
-						//log.Printf("Error while appending entries to server %v", server)
+				return
+			}
+			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
+			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
+			prevlogindex := nextindex - 1
+			prevlogterm := 0
+			if prevlogindex >= 0 && prevlogindex < len(rf.EventLogs) {
+				prevlogterm = rf.EventLogs[prevlogindex].Term
+			}
+			sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
+			copy(sendEntries, rf.EventLogs[nextindex:])
+			//log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
+			request := AppendEntriesArgs{
+				Term:         currentTerm,
+				LeaderId:     me,
+				PrevLogIndex: prevlogindex,
+				PrevLogTerm:  prevlogterm,
+				Entries:      sendEntries,
+				LeaderCommit: commitIndex,
+			}
+			rf.mu.Unlock()
+			go func(server int, request AppendEntriesArgs) {
+				reply := AppendEntriesReply{}
+				ok := rf.peers[server].Call("Raft.AppendEntries", &request, &reply)
+				if !ok {
+					//log.Printf("Error while appending entries to server %v", server)
+					return
+				} else {
+					//successfully sent a rpc and got a reply
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if reply.Term > rf.CurrentTerm {
+						//log.Printf("Found a higher term, stepping down.")
+						rf.CurrentTerm = reply.Term
+						rf.VotedFor = -1
+						rf.VoteCount = 0
+						rf.ServerState = Follower
 						return
-					} else {
-						//successfully sent a rpc and got a reply
-						rf.mu.Lock()
-						defer rf.mu.Unlock()
-						if reply.Term > rf.CurrentTerm {
-							//log.Printf("Found a higher term, stepping down.")
-							rf.CurrentTerm = reply.Term
-							rf.VotedFor = -1
-							rf.VoteCount = 0
-							rf.ServerState = Follower
-							return
+					}
+					if rf.ServerState != Leader || term != rf.CurrentTerm {
+						log.Printf("Cannot be the leader anymore,stepping down.")
+						rf.VoteCount = 0
+						rf.VotedFor = -1
+						return
+					}
+					if reply.Success {
+						log.Printf("Succesfully appended entries to server %v", server)
+						//till what index did we send. from nextindex onwards till the len(sendentries).
+						lastSent := len(sendEntries) + nextindex - 1
+						if lastSent > rf.MatchIndex[server] {
+							//log.Printf("earlier matchindex %v", rf.MatchIndex[server])
+							rf.MatchIndex[server] = lastSent
+							//log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
 						}
-						if rf.ServerState != Leader || term != rf.CurrentTerm {
-							log.Printf("Cannot be the leader anymore,stepping down.")
-							rf.VoteCount = 0
-							rf.VotedFor = -1
-							return
-						}
-						if reply.Success {
-							log.Printf("Succesfully appended entries to server %v", server)
-							//till what index did we send. from nextindex onwards till the len(sendentries).
-							lastSent := len(sendEntries) + nextindex - 1
-							if lastSent > rf.MatchIndex[server] {
-								//log.Printf("earlier matchindex %v", rf.MatchIndex[server])
-								rf.MatchIndex[server] = lastSent
-								//log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
+						rf.NextIndex[server] = lastSent + 1
+						//log.Printf("event logs length for server %v : %v", rf.me, len(rf.EventLogs))
+						//log.Printf("Commit index: %v", rf.CommitIndex)
+						for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
+							if rf.EventLogs[n].Term != currentTerm {
+								continue
 							}
-							rf.NextIndex[server] = lastSent + 1
-							//log.Printf("event logs length for server %v : %v", rf.me, len(rf.EventLogs))
-							//log.Printf("Commit index: %v", rf.CommitIndex)
-							for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
-								if rf.EventLogs[n].Term != term {
+							count := 1
+							for i := range rf.peers {
+								if i == rf.me {
 									continue
 								}
-								count := 1
-								for i := range rf.peers {
-									if i == rf.me {
-										continue
-									}
-									if rf.MatchIndex[i] >= n {
-										//if the current terms entries have been replicated the matchindex would be more than the index of
-										//current term.
-										count++
-									}
-								}
-								log.Printf("CheckMajorityAcceptance: term: %d, count: %d", term, count)
-								if count > len(rf.peers)/2 {
-									log.Printf("This entry can now be committed.")
-									rf.CommitIndex = n
-									log.Printf("Commit index: %v", rf.CommitIndex)
-									go rf.SendHeartbeatImmediate()
+								if rf.MatchIndex[i] >= n {
+									//if the current terms entries have been replicated the matchindex would be more than the index of
+									//current term.
+									count++
 								}
 							}
-						} else {
-							if rf.NextIndex[server] > 0 {
-								log.Printf("server that needs a higher term is %v", server)
-								rf.NextIndex[server]-- //backoff and send again.
-								log.Printf("Next index of server that needs a higher term: %v", rf.NextIndex[server])
+							//log.Printf("CheckMajorityAcceptance: term: %d, count: %d", currentTerm, count)
+							if count > len(rf.peers)/2 {
+								log.Printf("This entry can now be committed.")
+								rf.CommitIndex = n
+								log.Printf("Commit index: %v", rf.CommitIndex)
+								go rf.SendHeartbeatImmediate()
 							}
 						}
+					} else {
+						if rf.NextIndex[server] > 0 {
+							log.Printf("server that needs a higher term is %v", server)
+							rf.NextIndex[server]-- //backoff and send again.
+							log.Printf("Next index of server that needs a higher term: %v", rf.NextIndex[server])
+						}
 					}
-				}(server, request)
-			}
+				}
+			}(server, request)
 		}
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
