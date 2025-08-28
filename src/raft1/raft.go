@@ -70,8 +70,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 type State int
 
@@ -256,22 +258,19 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 		me := rf.me
 		commitIndex := rf.CommitIndex
 		currentTerm := term
-		rf.mu.Unlock()
+
 		if isLeader {
-			rf.mu.Lock()
-			if rf.ServerState != Leader || rf.CurrentTerm != currentTerm {
-				rf.mu.Unlock()
-				return
-			}
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
+			if nextindex < 1 {
+				nextindex = 1
+			}
 			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
 			prevlogindex := nextindex - 1
 			prevlogterm := 0
 			if prevlogindex >= 0 && prevlogindex < len(rf.EventLogs) {
 				prevlogterm = rf.EventLogs[prevlogindex].Term
 			}
-			sendEntries := make([]LogEntry, len(rf.EventLogs[nextindex:])) //from nextindex till the end
-			copy(sendEntries, rf.EventLogs[nextindex:])
+			sendEntries := append([]LogEntry(nil), rf.EventLogs[nextindex:]...)
 			//log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
 			request := AppendEntriesArgs{
 				Term:         currentTerm,
@@ -282,79 +281,217 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				LeaderCommit: commitIndex,
 			}
 			rf.mu.Unlock()
-			go func(server int, request AppendEntriesArgs) {
-				reply := AppendEntriesReply{}
-				ok := rf.peers[server].Call("Raft.AppendEntries", &request, &reply)
-				if !ok {
-					//log.Printf("Error while appending entries to server %v", server)
-					return
-				} else {
-					//successfully sent a rpc and got a reply
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					if reply.Term > rf.CurrentTerm {
-						//log.Printf("Found a higher term, stepping down.")
-						rf.CurrentTerm = reply.Term
-						rf.VotedFor = -1
-						rf.VoteCount = 0
-						rf.ServerState = Follower
-						return
+			var reply AppendEntriesReply
+			ok := rf.peers[server].Call("Raft.AppendEntries", &request, &reply)
+			if !ok {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			rf.mu.Lock()
+			if reply.Term > currentTerm || rf.ServerState != Leader {
+				log.Printf("No longer in same term or no longer a leader.")
+				rf.mu.Unlock()
+				return
+			}
+			if reply.Term > rf.CurrentTerm {
+				rf.CurrentTerm = reply.Term
+				rf.VotedFor = -1
+				rf.VoteCount = 0
+				rf.ServerState = Follower
+				rf.mu.Unlock()
+				return
+			}
+			if reply.Success {
+				log.Printf("Successfully appended logs to server %v", server)
+				match := request.PrevLogIndex + len(request.Entries)
+				if match > rf.MatchIndex[server] {
+					rf.MatchIndex[server] = match
+				}
+				if rf.NextIndex[server] < match+1 {
+					rf.NextIndex[server] = match + 1
+				}
+
+				for N := rf.CommitIndex + 1; N < len(rf.EventLogs); N++ {
+					if rf.EventLogs[N].Term != rf.CurrentTerm {
+						continue
 					}
-					if rf.ServerState != Leader || term != rf.CurrentTerm {
-						log.Printf("Cannot be the leader anymore,stepping down.")
-						rf.VoteCount = 0
-						rf.VotedFor = -1
-						return
+					cnt := 1 // include leader
+					for i := range rf.peers {
+						if i != rf.me && rf.MatchIndex[i] >= N {
+							cnt++
+						}
 					}
-					if reply.Success {
-						log.Printf("Succesfully appended entries to server %v", server)
-						//till what index did we send. from nextindex onwards till the len(sendentries).
-						lastSent := len(sendEntries) + nextindex - 1
-						if lastSent > rf.MatchIndex[server] {
-							//log.Printf("earlier matchindex %v", rf.MatchIndex[server])
-							rf.MatchIndex[server] = lastSent
-							//log.Printf("Updated matchindex to %v for server %v", rf.MatchIndex[server], server)
-						}
-						rf.NextIndex[server] = lastSent + 1
-						//log.Printf("event logs length for server %v : %v", rf.me, len(rf.EventLogs))
-						//log.Printf("Commit index: %v", rf.CommitIndex)
-						for n := len(rf.EventLogs) - 1; n > rf.CommitIndex; n-- {
-							if rf.EventLogs[n].Term != currentTerm {
-								continue
-							}
-							count := 1
-							for i := range rf.peers {
-								if i == rf.me {
-									continue
-								}
-								if rf.MatchIndex[i] >= n {
-									//if the current terms entries have been replicated the matchindex would be more than the index of
-									//current term.
-									count++
-								}
-							}
-							//log.Printf("CheckMajorityAcceptance: term: %d, count: %d", currentTerm, count)
-							if count > len(rf.peers)/2 {
-								log.Printf("This entry can now be committed.")
-								rf.CommitIndex = n
-								log.Printf("Commit index: %v", rf.CommitIndex)
-								go rf.SendHeartbeatImmediate()
-							}
-						}
-					} else {
-						if rf.NextIndex[server] > 0 {
-							log.Printf("server that needs a higher term is %v", server)
-							rf.NextIndex[server]-- //backoff and send again.
-							log.Printf("Next index of server that needs a higher term: %v", rf.NextIndex[server])
-						}
+					if cnt > len(rf.peers)/2 {
+						rf.CommitIndex = N
 					}
 				}
-			}(server, request)
+				rf.mu.Unlock()
+				ms := 50 + (rand.Int63() % 300)
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+				continue
+			} else {
+				newNextIndex := rf.NextIndex[server] - 1
+				conflictTerm := reply.ConflictTerm
+				conflictIndex := reply.ConflictIndex
+				if conflictTerm != -1 {
+					lastConflictIndex := -1
+					for i := len(rf.EventLogs) - 1; i >= 0; i-- {
+						if rf.EventLogs[i].Term == conflictTerm {
+							lastConflictIndex = i
+							break
+						}
+					}
+					if lastConflictIndex != -1 {
+						newNextIndex = lastConflictIndex + 1
+					} else if conflictIndex >= 1 {
+						newNextIndex = conflictIndex
+					}
+				} else if conflictIndex != -1 {
+					newNextIndex = conflictIndex
+				}
+				if newNextIndex < 1 {
+					newNextIndex = 1
+				}
+
+				rf.NextIndex[server] = newNextIndex
+				rf.mu.Unlock()
+				ms := 50 + (rand.Int63() % 300)
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+			}
 		}
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
+
+//func (rf *Raft) ReplicateToFollower(server int, electedTerm int) {
+//	for !rf.killed() {
+//		rf.mu.Lock()
+//		// stop if not leader or term changed
+//		if rf.ServerState != Leader || rf.CurrentTerm != electedTerm {
+//			rf.mu.Unlock()
+//			return
+//		}
+//
+//		// prepare AppendEntries
+//		nextIndex := rf.NextIndex[server]
+//		if nextIndex < 1 {
+//			nextIndex = 1 // index 0 is the dummy entry
+//		}
+//		prevIndex := nextIndex - 1
+//		prevTerm := 0
+//		if prevIndex >= 0 && prevIndex < len(rf.EventLogs) {
+//			prevTerm = rf.EventLogs[prevIndex].Term
+//		}
+//		entries := append([]LogEntry(nil), rf.EventLogs[nextIndex:]...)
+//		args := AppendEntriesArgs{
+//			Term:         rf.CurrentTerm,
+//			LeaderId:     rf.me,
+//			PrevLogIndex: prevIndex,
+//			PrevLogTerm:  prevTerm,
+//			Entries:      entries,
+//			LeaderCommit: rf.CommitIndex,
+//		}
+//		rf.mu.Unlock()
+//
+//		var reply AppendEntriesReply
+//		ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
+//		if !ok {
+//			// back off a bit and retry
+//			time.Sleep(50 * time.Millisecond)
+//			continue
+//		}
+//
+//		rf.mu.Lock()
+//		// term changed or no longer leader
+//		if rf.CurrentTerm != electedTerm || rf.ServerState != Leader {
+//			rf.mu.Unlock()
+//			return
+//		}
+//
+//		// discovered higher term
+//		if reply.Term > rf.CurrentTerm {
+//			rf.CurrentTerm = reply.Term
+//			rf.VotedFor = -1
+//			rf.VoteCount = 0
+//			rf.ServerState = Follower
+//			rf.mu.Unlock()
+//			return
+//		}
+//
+//		if reply.Success {
+//			// advance match/next
+//			match := args.PrevLogIndex + len(args.Entries)
+//			if match > rf.MatchIndex[server] {
+//				rf.MatchIndex[server] = match
+//			}
+//			if rf.NextIndex[server] < match+1 {
+//				rf.NextIndex[server] = match + 1
+//			}
+//
+//			// advance commit index (Raft §5.3)
+//			for N := rf.CommitIndex + 1; N < len(rf.EventLogs); N++ {
+//				if rf.EventLogs[N].Term != rf.CurrentTerm {
+//					continue
+//				}
+//				cnt := 1 // include leader
+//				for i := range rf.peers {
+//					if i != rf.me && rf.MatchIndex[i] >= N {
+//						cnt++
+//					}
+//				}
+//				if cnt > len(rf.peers)/2 {
+//					rf.CommitIndex = N
+//				}
+//			}
+//
+//			rf.mu.Unlock()
+//			// small delay to avoid hot loop
+//			time.Sleep(10 * time.Millisecond)
+//			continue
+//		}
+//
+//		// failure: adjust NextIndex using conflict info if present
+//		// (make sure your AppendEntriesReply includes ConflictTerm/ConflictIndex and you set them on the follower)
+//		type conflictReply interface {
+//			GetConflictTerm() int
+//			GetConflictIndex() int
+//		}
+//		// generic fallback if your reply doesn't implement conflict info:
+//		newNext := rf.NextIndex[server] - 1
+//		if newNext < 1 {
+//			newNext = 1
+//		}
+//
+//		// try to read conflict fields via type assertion if you added them
+//		if cr, ok := any(reply).(conflictReply); ok {
+//			cTerm := cr.GetConflictTerm()
+//			cIndex := cr.GetConflictIndex()
+//			if cTerm != -1 {
+//				last := -1
+//				for i := len(rf.EventLogs) - 1; i >= 0; i-- {
+//					if rf.EventLogs[i].Term == cTerm {
+//						last = i
+//						break
+//					}
+//				}
+//				if last != -1 {
+//					newNext = last + 1
+//				} else if cIndex >= 1 {
+//					newNext = cIndex
+//				}
+//			} else if cIndex >= 1 {
+//				newNext = cIndex
+//			}
+//			if newNext < 1 {
+//				newNext = 1
+//			}
+//		}
+//
+//		rf.NextIndex[server] = newNext
+//		rf.mu.Unlock()
+//
+//		time.Sleep(10 * time.Millisecond)
+//	}
+//}
 
 func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
 
@@ -397,7 +534,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.CurrentTerm
 	reply.Success = false
-
+	reply.ConflictTerm = -1
+	reply.ConflictIndex = -1
 	// Term checks
 	if args.Term < rf.CurrentTerm {
 		return
@@ -410,32 +548,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// CONSISTENCY CHECK (applies to heartbeats too)
 	// PrevLogIndex must exist and match PrevLogTerm
-	if args.PrevLogIndex >= len(rf.EventLogs) || (args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm) {
-		// follower missing prev or term mismatch -> reject
+	if args.PrevLogIndex >= len(rf.EventLogs) {
+		// the prevlogindex is still larger than the size of the followers logs.
+		reply.ConflictIndex = len(rf.EventLogs)
 		return
 	}
 
+	if args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm {
+		//term mismatch; find the term that matches and accordingly set conflict index and conflict term
+		conflictTerm := rf.EventLogs[args.PrevLogIndex].Term
+		reply.ConflictTerm = conflictTerm
+		i := args.PrevLogIndex
+		for i >= 0 && rf.EventLogs[i].Term == conflictTerm {
+			i--
+		}
+		reply.ConflictIndex = i + 1
+		return
+	}
 	// Append / overwrite any new entries
 	insert := args.PrevLogIndex + 1
 	if len(args.Entries) > 0 {
 		// find first conflict; truncate once then append rest
-		conflictFound := false
 		for i := 0; i < len(args.Entries); i++ {
 			if insert+i < len(rf.EventLogs) {
 				if rf.EventLogs[insert+i].Term != args.Entries[i].Term {
 					rf.EventLogs = rf.EventLogs[:insert+i]
 					rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
-					conflictFound = true
 					break
 				}
 			} else {
 				rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
-				conflictFound = true
 				break
 			}
-		}
-		if !conflictFound {
-			// entries were already present and matched; nothing to append
 		}
 	}
 
@@ -452,7 +596,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// heartbeat / reset election timer
 	rf.LastHeartBeat = time.Now()
 	rf.ServerState = Follower
-
 	reply.Success = true
 	reply.Term = rf.CurrentTerm
 }
@@ -674,7 +817,7 @@ func (rf *Raft) applier() {
 		for rf.LastApplied < rf.CommitIndex {
 			nextidx := rf.LastApplied + 1
 			log.Printf("Applier last applied %v", rf.LastApplied)
-			log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
+			//log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
 			if nextidx >= len(rf.EventLogs) {
 				break
 			}
