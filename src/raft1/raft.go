@@ -365,10 +365,6 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 	}
 }
 
-func (rf *Raft) SendEventLogs(eventTerm int, eventCommand interface{}) {
-
-}
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -531,7 +527,7 @@ func (rf *Raft) PeriodicHeartbeats() {
 	defer ticker.Stop()
 	//log.Printf("Heartbeat periodic every %v", heartbeatInterval)
 	//when just became a leader send it right away.
-	rf.SendHeartbeatImmediate()
+	//rf.SendHeartbeatImmediate()
 	for {
 		select {
 		// if not the leader. cant send out shit.
