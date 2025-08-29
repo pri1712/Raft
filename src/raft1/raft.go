@@ -58,6 +58,8 @@ type Raft struct {
 	// ServerState a Raft server must maintain.
 	//to talk to the application
 	ApplicationChanel chan raftapi.ApplyMsg
+	//to have conditional run of the applier whenever there is a change in the commit index.
+	Cond *sync.Cond
 }
 
 type AppendEntriesArgs struct {
@@ -323,6 +325,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					}
 					if cnt > len(rf.peers)/2 {
 						rf.CommitIndex = N
+						rf.Cond.Signal()
 					}
 				}
 				rf.mu.Unlock()
@@ -460,6 +463,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.CommitIndex = args.LeaderCommit
 		}
+		rf.Cond.Signal()
 	}
 
 	// heartbeat / reset election timer
@@ -682,26 +686,26 @@ func (rf *Raft) StartElection() {
 func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		log.Printf("lastapplied %v < commitindex %v on server %v ", rf.LastApplied, rf.CommitIndex, rf.me)
-		for rf.LastApplied < rf.CommitIndex {
-			nextidx := rf.LastApplied + 1
-			log.Printf("Applier last applied %v", rf.LastApplied)
-			//log.Printf("Event logs for server %v, %v", rf.me, rf.EventLogs)
-			if nextidx >= len(rf.EventLogs) {
-				break
-			}
-			command := rf.EventLogs[nextidx].Command
-			msg := raftapi.ApplyMsg{CommandValid: true, Command: command, CommandIndex: nextidx}
+		for rf.LastApplied >= rf.CommitIndex && !rf.killed() {
+			rf.Cond.Wait()
+		}
+		if rf.killed() {
 			rf.mu.Unlock()
-			rf.ApplicationChanel <- msg //send it into the channel to be read by the applicn.
+			return
+		}
+		for rf.LastApplied < rf.CommitIndex {
+			rf.LastApplied++
+			idx := rf.LastApplied
+			cmd := rf.EventLogs[idx].Command
+			msg := raftapi.ApplyMsg{CommandValid: true, Command: cmd, CommandIndex: idx}
+			rf.mu.Unlock()
+			rf.ApplicationChanel <- msg
 			rf.mu.Lock()
-			rf.LastApplied = nextidx
 		}
 		rf.mu.Unlock()
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
+
 func (rf *Raft) ticker() {
 	//code necessary for 3A
 	for rf.killed() == false {
@@ -757,6 +761,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.StopHeartBeat = make(chan bool, 1)
 	// initialize from ServerState persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.Cond = sync.NewCond(&rf.mu)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applier()
