@@ -7,7 +7,10 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
+	"bytes"
 	"log"
+	"raft/src/labgob"
+
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -141,7 +144,26 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
-
+	writeBuffer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(writeBuffer)
+	err := encoder.Encode(rf.CurrentTerm)
+	if err != nil {
+		log.Printf("error encoding current term: %v", err)
+		return
+	}
+	err = encoder.Encode(rf.VotedFor)
+	if err != nil {
+		log.Printf("error encoding voted for: %v", err)
+		return
+	}
+	err = encoder.Encode(rf.EventLogs)
+	if err != nil {
+		log.Printf("error encoding event logs: %v", err)
+		return
+	}
+	raftState := writeBuffer.Bytes()
+	rf.persister.Save(raftState, nil)
+	log.Printf("Successfully persisted all 3 state variables")
 }
 
 // restore previously persisted ServerState.
@@ -163,6 +185,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	readBuffer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(readBuffer)
+	var CurrentTerm int
+	var VotedFor int
+	var EventLogs []LogEntry
+	if decoder.Decode(&CurrentTerm) != nil || decoder.Decode(&VotedFor) != nil || decoder.Decode(&EventLogs) != nil {
+		log.Printf("readPersist failed while decoding")
+	} else {
+		rf.mu.Lock()
+		rf.CurrentTerm = CurrentTerm
+		rf.VotedFor = VotedFor
+		rf.EventLogs = EventLogs
+		rf.mu.Unlock()
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -303,6 +339,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				rf.VotedFor = -1
 				rf.VoteCount = 0
 				rf.ServerState = Follower
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			}
@@ -336,6 +373,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				time.Sleep(time.Duration(ms) * time.Millisecond)
 				continue
 			} else {
+				//backoff logic. skip over all the same terms, to reduce the number of RPC calls.
 				newNextIndex := rf.NextIndex[server] - 1
 				conflictTerm := reply.ConflictTerm
 				conflictIndex := reply.ConflictIndex
@@ -389,6 +427,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader {
 		index = len(rf.EventLogs)
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
+		rf.persist()
 		//go rf.SendEventLogs(term, command)
 	} else {
 		return -1, term, false
@@ -415,6 +454,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
 		rf.ServerState = Follower
+		rf.persist()
 	}
 
 	// CONSISTENCY CHECK (applies to heartbeats too)
@@ -462,6 +502,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.CommitIndex = args.LeaderCommit
 		}
+		rf.persist()
 		rf.Cond.Signal()
 	}
 
@@ -495,9 +536,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	//log.Printf("peers: %v", rf.peers[server])
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, reply)
 	if !ok {
-		//log.Printf("AppendEntries failed for server %d", server)
-	} else {
-		//log.Printf("AppendEntries for server %d", server)
+		//log.Printf("SendHeartBeatToPeers failed for server %v", server)
 	}
 }
 
@@ -558,6 +597,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 		rf.VotedFor = -1
 		rf.VoteCount = 0
 		rf.ServerState = Follower
+		rf.persist()
 		return
 	}
 

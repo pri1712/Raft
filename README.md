@@ -1,9 +1,12 @@
 # Raft Consensus Algorithm
 
-This repository contains my implementation of the **Raft consensus algorithm** in Go, leader election has been 
-implemented and is sufficiently passing tests even with concurrent data accesses and unreliable network. 
+This repository contains my implementation of the **Raft consensus algorithm** in Go.  
+Leader election and log replication have been implemented and are sufficiently passing tests even with concurrent data accesses and unreliable networks.
 
-### Further Steps:
-1. Implement log replication across the raft replicas
-2. Implement Snapshotting
-3. Implement Persistence to disk Mechanism.
+### Implemented Features
+- Leader election with safety under concurrency and unreliable communication
+- Log replication across Raft replicas, ensuring consistency of client commands
+
+### Next Steps
+1. Implement snapshotting for efficient state transfer and log compaction
+2. Implement persistence to disk to survive process crashes and restarts
