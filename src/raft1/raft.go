@@ -522,7 +522,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 
 func (rf *Raft) PeriodicHeartbeats() {
 	defer utils.RecoverWithStackTrace("PeriodicHeartbeats", rf.me)
-	heartbeatInterval := 100 * time.Millisecond
+	heartbeatInterval := 150 * time.Millisecond //to try and reduce RPC count.
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 	//log.Printf("Heartbeat periodic every %v", heartbeatInterval)
