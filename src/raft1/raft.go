@@ -132,6 +132,7 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
+	//to save to the disk.
 	// Your code here (3C).
 	// Example:
 	// w := new(bytes.Buffer)
@@ -140,10 +141,12 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
 }
 
 // restore previously persisted ServerState.
 func (rf *Raft) readPersist(data []byte) {
+	//to read from the disk.
 	if data == nil || len(data) < 1 { // bootstrap without any ServerState?
 		return
 	}
@@ -522,7 +525,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 
 func (rf *Raft) PeriodicHeartbeats() {
 	defer utils.RecoverWithStackTrace("PeriodicHeartbeats", rf.me)
-	heartbeatInterval := 150 * time.Millisecond //to try and reduce RPC count.
+	heartbeatInterval := 125 * time.Millisecond //to try and reduce RPC count.
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 	//log.Printf("Heartbeat periodic every %v", heartbeatInterval)
@@ -609,32 +612,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//the log with the later(greater term number) Term is more up-to-date. If the logs
 	//end with the same Term, then whichever log is longer is
 	//more up-to-date
-	checkLogs := false
 	nodeLastLogIndex := len(rf.EventLogs) - 1
 	nodeLastLogTerm := 0
 	if nodeLastLogIndex >= 0 {
 		nodeLastLogTerm = rf.EventLogs[nodeLastLogIndex].Term
 	}
-	if args.LastLogTerm != nodeLastLogTerm {
-		//if the last entries are different
-		if args.LastLogTerm > nodeLastLogTerm {
-			checkLogs = true
-		} else {
-			checkLogs = false
-		}
-	} else {
-		//check which log is longer.
-		checkLogs = args.LastLogIndex >= nodeLastLogIndex
+
+	upToDate := false
+	if args.LastLogTerm > nodeLastLogTerm ||
+		(args.LastLogTerm == nodeLastLogTerm && args.LastLogIndex >= nodeLastLogIndex) {
+		upToDate = true
 	}
-	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
-		if checkLogs == false {
-			reply.VoteGranted = false
-			return
-		}
-		reply.VoteGranted = true
+	if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateId) && upToDate {
 		rf.VotedFor = args.CandidateId
-		reply.Term = rf.CurrentTerm
-		//make sure to add log checks here.
+		reply.VoteGranted = true
+		// reset election timeout.
+		rf.LastHeartBeat = time.Now()
+		rf.persist()
 	}
 	//log.Printf("Vote granted to %v", args.CandidateId)
 	//return nil
