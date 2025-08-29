@@ -163,7 +163,7 @@ func (rf *Raft) persist() {
 	}
 	raftState := writeBuffer.Bytes()
 	rf.persister.Save(raftState, nil)
-	log.Printf("Successfully persisted all 3 state variables")
+	//log.Printf("Successfully persisted all 3 state variables")
 }
 
 // restore previously persisted ServerState.
@@ -263,42 +263,21 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-//func (rf *Raft) HandleAppendEntries(reply *AppendEntriesReply) {
-//	rf.mu.Lock()
-//	term := rf.CurrentTerm
-//	isLeader := rf.ServerState == Leader
-//	if reply.Term > term || !isLeader {
-//		rf.CurrentTerm = reply.Term
-//		rf.VotedFor = -1
-//		rf.ServerState = Follower
-//		rf.VoteCount = 0
-//	} else {
-//		//if the success is set to true, its fine. just updates logs and stuff.
-//		//if success is false, got to fid the previous matching Term in the log of this server and the
-//		//leader.
-//		return
-//	}
-//
-//}
-
-//func (rf *Raft) GetCommitIndex(args *DummyArgs, reply *DummyReply) {
-//	rf.mu.Lock()
-//	defer rf.mu.Unlock()
-//	reply.CommitIndex = rf.CommitIndex
-//}
-
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.CurrentTerm != term || rf.ServerState != Leader {
 			//log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
+			rf.VoteCount = 0
+			rf.VotedFor = -1
+			rf.ServerState = Follower
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
 		isLeader := rf.ServerState == Leader
 		me := rf.me
 		commitIndex := rf.CommitIndex
-		currentTerm := term
 
 		if isLeader {
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
@@ -314,7 +293,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			sendEntries := append([]LogEntry(nil), rf.EventLogs[nextindex:]...)
 			//log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
 			request := AppendEntriesArgs{
-				Term:         currentTerm,
+				Term:         term,
 				LeaderId:     me,
 				PrevLogIndex: prevlogindex,
 				PrevLogTerm:  prevlogterm,
@@ -329,7 +308,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				continue
 			}
 			rf.mu.Lock()
-			if reply.Term > currentTerm || rf.ServerState != Leader {
+			if reply.Term > term || rf.ServerState != Leader {
 				log.Printf("No longer in same term or no longer a leader.")
 				rf.mu.Unlock()
 				return
@@ -454,6 +433,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
 		rf.ServerState = Follower
+		rf.VoteCount = 0
 		rf.persist()
 	}
 
@@ -485,10 +465,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if rf.EventLogs[insert+i].Term != args.Entries[i].Term {
 					rf.EventLogs = rf.EventLogs[:insert+i]
 					rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+					rf.persist()
 					break
 				}
 			} else {
 				rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+				rf.persist()
 				break
 			}
 		}
@@ -502,7 +484,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.CommitIndex = args.LeaderCommit
 		}
-		rf.persist()
 		rf.Cond.Signal()
 	}
 
@@ -557,7 +538,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 			continue
 		}
 		//log.Printf("Sending heartbeat to %v", i)
-		go rf.SendHeartBeatToPeers(i, term, leaderId) //send concurrently to increase speed.
+		go rf.SendHeartBeatToPeers(i, term, leaderId) //send concrrently to increase speed.
 	}
 
 }
@@ -587,6 +568,7 @@ func (rf *Raft) PeriodicHeartbeats() {
 	}
 }
 
+// HandleVoteReplies handles the votes that a server receives.
 func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("HandleVoteReplies", rf.me)
@@ -685,6 +667,10 @@ func (rf *Raft) StartElection() {
 	//log.Printf("Start Election")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("StartElection", rf.me)
+	if rf.killed() {
+		rf.mu.Unlock()
+		return
+	}
 	rf.CurrentTerm++
 	term := rf.CurrentTerm
 	rf.ServerState = Candidate
@@ -692,6 +678,7 @@ func (rf *Raft) StartElection() {
 	rf.VoteCount = 1
 	lastLogIndex := len(rf.EventLogs) - 1
 	lastLogTerm := 0
+	rf.persist()
 	if lastLogIndex >= 0 {
 		lastLogTerm = rf.EventLogs[lastLogIndex].Term
 	}
