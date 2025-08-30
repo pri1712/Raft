@@ -962,6 +962,7 @@ func TestFigure83C(t *testing.T) {
 }
 
 func TestUnreliableAgree3C(t *testing.T) {
+	//tests agreement in unreliable network.
 	servers := 5
 	ts := makeTest(t, servers, false, false)
 	defer ts.cleanup()
