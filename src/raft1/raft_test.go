@@ -10,6 +10,8 @@ package raft
 
 import (
 	"fmt"
+	"log"
+
 	// "log"
 	"math/rand"
 	"sync"
@@ -1013,6 +1015,7 @@ func TestFigure8Unreliable3C(t *testing.T) {
 			}
 			if ok && ts.g.IsConnected(i) {
 				leader = i
+				log.Printf("in the test script leader is %v", leader)
 			}
 		}
 
@@ -1046,7 +1049,7 @@ func TestFigure8Unreliable3C(t *testing.T) {
 		}
 	}
 	tester.AnnotateConnection(ts.g.GetConnected())
-
+	log.Printf("Final command next")
 	ts.one(rand.Int()%10000, servers, true)
 }
 

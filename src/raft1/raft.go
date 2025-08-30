@@ -7,7 +7,10 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
+	"bytes"
 	"log"
+	"raft/src/labgob"
+
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -132,6 +135,7 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
+	//to save to the disk.
 	// Your code here (3C).
 	// Example:
 	// w := new(bytes.Buffer)
@@ -140,10 +144,31 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	writeBuffer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(writeBuffer)
+	err := encoder.Encode(rf.CurrentTerm)
+	if err != nil {
+		log.Printf("error encoding current term: %v", err)
+		return
+	}
+	err = encoder.Encode(rf.VotedFor)
+	if err != nil {
+		log.Printf("error encoding voted for: %v", err)
+		return
+	}
+	err = encoder.Encode(rf.EventLogs)
+	if err != nil {
+		log.Printf("error encoding event logs: %v", err)
+		return
+	}
+	raftState := writeBuffer.Bytes()
+	rf.persister.Save(raftState, nil)
+	//log.Printf("Successfully persisted all 3 state variables")
 }
 
 // restore previously persisted ServerState.
 func (rf *Raft) readPersist(data []byte) {
+	//to read from the disk.
 	if data == nil || len(data) < 1 { // bootstrap without any ServerState?
 		return
 	}
@@ -160,6 +185,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	readBuffer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(readBuffer)
+	var CurrentTerm int
+	var VotedFor int
+	var EventLogs []LogEntry
+	if decoder.Decode(&CurrentTerm) != nil || decoder.Decode(&VotedFor) != nil || decoder.Decode(&EventLogs) != nil {
+		log.Printf("readPersist failed while decoding")
+	} else {
+		rf.mu.Lock()
+		rf.CurrentTerm = CurrentTerm
+		rf.VotedFor = VotedFor
+		rf.EventLogs = EventLogs
+		rf.mu.Unlock()
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -224,42 +263,21 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-//func (rf *Raft) HandleAppendEntries(reply *AppendEntriesReply) {
-//	rf.mu.Lock()
-//	term := rf.CurrentTerm
-//	isLeader := rf.ServerState == Leader
-//	if reply.Term > term || !isLeader {
-//		rf.CurrentTerm = reply.Term
-//		rf.VotedFor = -1
-//		rf.ServerState = Follower
-//		rf.VoteCount = 0
-//	} else {
-//		//if the success is set to true, its fine. just updates logs and stuff.
-//		//if success is false, got to fid the previous matching Term in the log of this server and the
-//		//leader.
-//		return
-//	}
-//
-//}
-
-//func (rf *Raft) GetCommitIndex(args *DummyArgs, reply *DummyReply) {
-//	rf.mu.Lock()
-//	defer rf.mu.Unlock()
-//	reply.CommitIndex = rf.CommitIndex
-//}
-
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.CurrentTerm != term || rf.ServerState != Leader {
 			//log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
+			rf.VoteCount = 0
+			rf.VotedFor = -1
+			rf.ServerState = Follower
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
 		isLeader := rf.ServerState == Leader
 		me := rf.me
 		commitIndex := rf.CommitIndex
-		currentTerm := term
 
 		if isLeader {
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
@@ -275,7 +293,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			sendEntries := append([]LogEntry(nil), rf.EventLogs[nextindex:]...)
 			//log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
 			request := AppendEntriesArgs{
-				Term:         currentTerm,
+				Term:         term,
 				LeaderId:     me,
 				PrevLogIndex: prevlogindex,
 				PrevLogTerm:  prevlogterm,
@@ -290,7 +308,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				continue
 			}
 			rf.mu.Lock()
-			if reply.Term > currentTerm || rf.ServerState != Leader {
+			if reply.Term > term || rf.ServerState != Leader {
 				log.Printf("No longer in same term or no longer a leader.")
 				rf.mu.Unlock()
 				return
@@ -300,6 +318,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				rf.VotedFor = -1
 				rf.VoteCount = 0
 				rf.ServerState = Follower
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			}
@@ -333,6 +352,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				time.Sleep(time.Duration(ms) * time.Millisecond)
 				continue
 			} else {
+				//backoff logic. skip over all the same terms, to reduce the number of RPC calls.
 				newNextIndex := rf.NextIndex[server] - 1
 				conflictTerm := reply.ConflictTerm
 				conflictIndex := reply.ConflictIndex
@@ -386,6 +406,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader {
 		index = len(rf.EventLogs)
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
+		rf.persist()
 		//go rf.SendEventLogs(term, command)
 	} else {
 		return -1, term, false
@@ -412,6 +433,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
 		rf.ServerState = Follower
+		rf.VoteCount = 0
+		rf.persist()
 	}
 
 	// CONSISTENCY CHECK (applies to heartbeats too)
@@ -442,10 +465,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				if rf.EventLogs[insert+i].Term != args.Entries[i].Term {
 					rf.EventLogs = rf.EventLogs[:insert+i]
 					rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+					rf.persist()
 					break
 				}
 			} else {
 				rf.EventLogs = append(rf.EventLogs, args.Entries[i:]...)
+				rf.persist()
 				break
 			}
 		}
@@ -492,9 +517,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	//log.Printf("peers: %v", rf.peers[server])
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, reply)
 	if !ok {
-		//log.Printf("AppendEntries failed for server %d", server)
-	} else {
-		//log.Printf("AppendEntries for server %d", server)
+		//log.Printf("SendHeartBeatToPeers failed for server %v", server)
 	}
 }
 
@@ -515,14 +538,14 @@ func (rf *Raft) SendHeartbeatImmediate() {
 			continue
 		}
 		//log.Printf("Sending heartbeat to %v", i)
-		go rf.SendHeartBeatToPeers(i, term, leaderId) //send concurrently to increase speed.
+		go rf.SendHeartBeatToPeers(i, term, leaderId) //send concrrently to increase speed.
 	}
 
 }
 
 func (rf *Raft) PeriodicHeartbeats() {
 	defer utils.RecoverWithStackTrace("PeriodicHeartbeats", rf.me)
-	heartbeatInterval := 150 * time.Millisecond //to try and reduce RPC count.
+	heartbeatInterval := 125 * time.Millisecond //to try and reduce RPC count.
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 	//log.Printf("Heartbeat periodic every %v", heartbeatInterval)
@@ -545,6 +568,7 @@ func (rf *Raft) PeriodicHeartbeats() {
 	}
 }
 
+// HandleVoteReplies handles the votes that a server receives.
 func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("HandleVoteReplies", rf.me)
@@ -555,6 +579,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply) {
 		rf.VotedFor = -1
 		rf.VoteCount = 0
 		rf.ServerState = Follower
+		rf.persist()
 		return
 	}
 
@@ -609,32 +634,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//the log with the later(greater term number) Term is more up-to-date. If the logs
 	//end with the same Term, then whichever log is longer is
 	//more up-to-date
-	checkLogs := false
 	nodeLastLogIndex := len(rf.EventLogs) - 1
 	nodeLastLogTerm := 0
 	if nodeLastLogIndex >= 0 {
 		nodeLastLogTerm = rf.EventLogs[nodeLastLogIndex].Term
 	}
-	if args.LastLogTerm != nodeLastLogTerm {
-		//if the last entries are different
-		if args.LastLogTerm > nodeLastLogTerm {
-			checkLogs = true
-		} else {
-			checkLogs = false
-		}
-	} else {
-		//check which log is longer.
-		checkLogs = args.LastLogIndex >= nodeLastLogIndex
+
+	upToDate := false
+	if args.LastLogTerm > nodeLastLogTerm ||
+		(args.LastLogTerm == nodeLastLogTerm && args.LastLogIndex >= nodeLastLogIndex) {
+		upToDate = true
 	}
-	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
-		if checkLogs == false {
-			reply.VoteGranted = false
-			return
-		}
-		reply.VoteGranted = true
+	if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateId) && upToDate {
 		rf.VotedFor = args.CandidateId
-		reply.Term = rf.CurrentTerm
-		//make sure to add log checks here.
+		reply.VoteGranted = true
+		// reset election timeout.
+		rf.LastHeartBeat = time.Now()
+		rf.persist()
 	}
 	//log.Printf("Vote granted to %v", args.CandidateId)
 	//return nil
@@ -651,6 +667,10 @@ func (rf *Raft) StartElection() {
 	//log.Printf("Start Election")
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("StartElection", rf.me)
+	if rf.killed() {
+		rf.mu.Unlock()
+		return
+	}
 	rf.CurrentTerm++
 	term := rf.CurrentTerm
 	rf.ServerState = Candidate
@@ -658,6 +678,7 @@ func (rf *Raft) StartElection() {
 	rf.VoteCount = 1
 	lastLogIndex := len(rf.EventLogs) - 1
 	lastLogTerm := 0
+	rf.persist()
 	if lastLogIndex >= 0 {
 		lastLogTerm = rf.EventLogs[lastLogIndex].Term
 	}
