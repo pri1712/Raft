@@ -962,6 +962,7 @@ func TestFigure83C(t *testing.T) {
 }
 
 func TestUnreliableAgree3C(t *testing.T) {
+	//tests agreement in unreliable network.
 	servers := 5
 	ts := makeTest(t, servers, false, false)
 	defer ts.cleanup()
@@ -1015,7 +1016,6 @@ func TestFigure8Unreliable3C(t *testing.T) {
 			}
 			if ok && ts.g.IsConnected(i) {
 				leader = i
-				log.Printf("in the test script leader is %v", leader)
 			}
 		}
 
