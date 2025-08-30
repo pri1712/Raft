@@ -427,7 +427,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("AppendEntries", rf.me)
 	defer rf.mu.Unlock()
-
+	defer rf.persist()
 	// default reply
 	reply.Term = rf.CurrentTerm
 	reply.Success = false
@@ -446,7 +446,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 		rf.VoteCount = 0
-		rf.persist()
 	}
 
 	// consistency check: PrevLogIndex must exist and match PrevLogTerm
@@ -486,7 +485,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			truncIndex := insert + firstDiff
 			rf.EventLogs = rf.EventLogs[:truncIndex]
 			rf.EventLogs = append(rf.EventLogs, args.Entries[firstDiff:]...)
-			rf.persist()
 		}
 	}
 
@@ -506,7 +504,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.ServerState = Follower
 	reply.Success = true
 	reply.Term = rf.CurrentTerm
-	rf.persist()
 }
 
 func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
@@ -587,6 +584,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("HandleVoteReplies", rf.me)
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if rf.killed() {
 		return
 	}
@@ -595,7 +593,6 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 		rf.VotedFor = -1
 		rf.VoteCount = 0
 		rf.ServerState = Follower
-		rf.persist()
 		return
 	}
 	if rf.ServerState != Candidate || rf.CurrentTerm != originalTerm {
@@ -630,6 +627,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer utils.RecoverWithStackTrace("RequestVote", rf.me)
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	reply.VoteGranted = false
 	if rf.killed() {
 		return
@@ -646,7 +644,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 		rf.VoteCount = 0
-		rf.persist()
 	}
 	reply.Term = rf.CurrentTerm
 	//grant vote only if;
@@ -670,7 +667,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateId) && upToDate {
 		rf.VotedFor = args.CandidateId
-		rf.persist()
 		reply.VoteGranted = true
 		// reset election timeout.
 		rf.LastHeartBeat = time.Now()
