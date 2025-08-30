@@ -1015,7 +1015,6 @@ func TestFigure8Unreliable3C(t *testing.T) {
 			}
 			if ok && ts.g.IsConnected(i) {
 				leader = i
-				log.Printf("in the test script leader is %v", leader)
 			}
 		}
 

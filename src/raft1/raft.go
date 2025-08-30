@@ -169,7 +169,9 @@ func (rf *Raft) persist() {
 // restore previously persisted ServerState.
 func (rf *Raft) readPersist(data []byte) {
 	//to read from the disk.
+	log.Println("readPersist")
 	if data == nil || len(data) < 1 { // bootstrap without any ServerState?
+		log.Println("readPersist empty data")
 		return
 	}
 	// Your code here (3C).
@@ -193,11 +195,12 @@ func (rf *Raft) readPersist(data []byte) {
 	if decoder.Decode(&CurrentTerm) != nil || decoder.Decode(&VotedFor) != nil || decoder.Decode(&EventLogs) != nil {
 		log.Printf("readPersist failed while decoding")
 	} else {
-		rf.mu.Lock()
 		rf.CurrentTerm = CurrentTerm
+		log.Printf("loaded current term %v", rf.CurrentTerm)
 		rf.VotedFor = VotedFor
+		log.Printf("loaded voted for: %v", VotedFor)
 		rf.EventLogs = EventLogs
-		rf.mu.Unlock()
+		log.Printf("loaded event logs: %v", EventLogs)
 	}
 }
 
@@ -624,6 +627,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 		rf.VoteCount = 0
+		rf.persist()
 	}
 	reply.Term = rf.CurrentTerm
 	//grant vote only if;
@@ -672,13 +676,14 @@ func (rf *Raft) StartElection() {
 		return
 	}
 	rf.CurrentTerm++
+	rf.persist()
 	term := rf.CurrentTerm
 	rf.ServerState = Candidate
 	rf.VotedFor = rf.me
 	rf.VoteCount = 1
+	rf.persist()
 	lastLogIndex := len(rf.EventLogs) - 1
 	lastLogTerm := 0
-	rf.persist()
 	if lastLogIndex >= 0 {
 		lastLogTerm = rf.EventLogs[lastLogIndex].Term
 	}
@@ -693,7 +698,7 @@ func (rf *Raft) StartElection() {
 			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(server, request, reply)
 			if !ok {
-				log.Printf("RequestVote Failed")
+				//log.Printf("RequestVote Failed")
 			} else {
 				rf.HandleVoteReplies(reply)
 			}
