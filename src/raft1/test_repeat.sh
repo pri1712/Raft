@@ -1,7 +1,10 @@
 #!/bin/bash
-for i in {1..10}; do
+num_runs=$1
+cmd=$2
+
+for ((i=1; i<=num_runs; i++)); do
   echo "========== Run $i =========="
-  output=$(go test -run $1 2>&1)
+  output=$(go test -run "$cmd" 2>&1)
   echo "$output"
   failed=$(echo "$output" | grep -E "FAIL\s+[a-zA-Z0-9_/]+\.Test[^\s]+")
 
