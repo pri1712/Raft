@@ -433,10 +433,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.CurrentTerm {
 		return
 	}
-	if args.Term > rf.CurrentTerm && rf.ServerState != Follower {
+	if args.Term > rf.CurrentTerm {
 		//if candidate or leader and your term is lower then gotta go back to being a follower
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
+		rf.ServerState = Follower
+		rf.VoteCount = 0
+		rf.persist()
+	}
+
+	reply.Term = rf.CurrentTerm
+
+	if rf.ServerState != Follower {
 		rf.ServerState = Follower
 		rf.VoteCount = 0
 	}
@@ -460,6 +468,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Append / overwrite entries starting at insert index
 	insert := args.PrevLogIndex + 1
 	if len(args.Entries) > 0 {
+		needsPersistence := false
+		//basically is  a log replication RPC not a heartbeat one.
 		// find first position where entries diverge
 		firstDiff := -1
 		for i := 0; i < len(args.Entries); i++ {
@@ -478,6 +488,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			truncIndex := insert + firstDiff
 			rf.EventLogs = rf.EventLogs[:truncIndex]
 			rf.EventLogs = append(rf.EventLogs, args.Entries[firstDiff:]...)
+			needsPersistence = true
+		}
+		if needsPersistence {
+			rf.persist()
 		}
 	}
 
@@ -494,10 +508,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//log.Printf("logs for node %v are : %v", rf.me, rf.EventLogs)
 	// heartbeat / reset election timer
 	rf.LastHeartBeat = time.Now()
-	rf.persist()
-	rf.ServerState = Follower
 	reply.Success = true
 	reply.Term = rf.CurrentTerm
+
 }
 
 func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
