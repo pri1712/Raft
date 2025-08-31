@@ -21,7 +21,6 @@ import (
 	"raft/src/labrpc"
 	"raft/src/raftapi"
 	"raft/src/tester1"
-	"raft/src/utils"
 )
 
 const (
@@ -116,7 +115,6 @@ type DummyReply struct {
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	utils.RecoverWithStackTrace("GetState", rf.me)
 	var term int
 	var isleader bool
 	// Your code here (3A).
@@ -425,7 +423,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // AppendEntries , this is on the server that is on the receiving end of the RPC.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer utils.RecoverWithStackTrace("AppendEntries", rf.me)
 	defer rf.mu.Unlock()
 	defer rf.persist()
 	// default reply
@@ -498,7 +495,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.Cond.Signal()
 	}
-	log.Printf("logs for node %v are : %v", rf.me, rf.EventLogs)
+	//log.Printf("logs for node %v are : %v", rf.me, rf.EventLogs)
 	// heartbeat / reset election timer
 	rf.LastHeartBeat = time.Now()
 	rf.ServerState = Follower
@@ -508,7 +505,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	rf.mu.Lock()
-	defer utils.RecoverWithStackTrace("SendHeartBeatToPeers", rf.me)
 	if rf.ServerState != Leader || rf.CurrentTerm != term || rf.killed() { //in case it's been modified by some other node.
 		rf.mu.Unlock()
 		return
@@ -536,7 +532,6 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 func (rf *Raft) SendHeartbeatImmediate() {
 	rf.mu.Lock()
 	//log.Printf("SendHeartbeatImmediate")
-	defer utils.RecoverWithStackTrace("SendHeartbeatImmediate", rf.me)
 	if rf.ServerState != Leader || rf.killed() {
 		rf.mu.Unlock()
 		return
@@ -556,7 +551,6 @@ func (rf *Raft) SendHeartbeatImmediate() {
 }
 
 func (rf *Raft) PeriodicHeartbeats() {
-	defer utils.RecoverWithStackTrace("PeriodicHeartbeats", rf.me)
 	heartbeatInterval := 100 * time.Millisecond //to try and reduce RPC count.
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -582,7 +576,6 @@ func (rf *Raft) PeriodicHeartbeats() {
 // HandleVoteReplies handles the votes that a server receives.
 func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 	rf.mu.Lock()
-	defer utils.RecoverWithStackTrace("HandleVoteReplies", rf.me)
 	defer rf.mu.Unlock()
 	defer rf.persist()
 	if rf.killed() {
@@ -625,7 +618,6 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//log.Printf("In requesting vote")
 	rf.mu.Lock()
-	defer utils.RecoverWithStackTrace("RequestVote", rf.me)
 	defer rf.mu.Unlock()
 	defer rf.persist()
 	reply.VoteGranted = false
@@ -675,17 +667,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//return nil
 }
 
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	defer utils.RecoverWithStackTrace("sendRequestVote", rf.me)
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
 func (rf *Raft) StartElection() {
 	//vote for self, increment the Term and send requestvote rpc
 	//log.Printf("Start Election")
 	rf.mu.Lock()
-	defer utils.RecoverWithStackTrace("StartElection", rf.me)
 	if rf.killed() {
 		rf.mu.Unlock()
 		return
@@ -711,7 +696,7 @@ func (rf *Raft) StartElection() {
 		go func(server int) {
 			request := &RequestVoteArgs{term, rf.me, lastLogIndex, lastLogTerm}
 			reply := &RequestVoteReply{}
-			ok := rf.sendRequestVote(server, request, reply)
+			ok := rf.peers[server].Call("Raft.RequestVote", request, reply)
 			if !ok {
 				//log.Printf("RequestVote Failed")
 			} else {
@@ -747,7 +732,6 @@ func (rf *Raft) ticker() {
 	//code necessary for 3A
 	for rf.killed() == false {
 		rf.mu.Lock()
-		defer utils.RecoverWithStackTrace("ticker", rf.me)
 		timeElapsed := time.Since(rf.LastHeartBeat)
 		isLeader := rf.ServerState == Leader
 		rf.mu.Unlock()
@@ -774,7 +758,6 @@ func (rf *Raft) ticker() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) *Raft {
 	// Your initialization code here (3A, 3B, 3C).
-	defer utils.RecoverWithStackTrace("Make", me)
 	rf := &Raft{}
 	//log.Printf("Starting a server")
 	rf.peers = peers
