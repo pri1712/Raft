@@ -455,7 +455,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for i >= 0 && rf.EventLogs[i].Term == conflictTerm {
 			i--
 		}
-		reply.ConflictIndex = i + 1
+		reply.ConflictIndex = i + 1 //the index which has the term that is mismatched in the follower.
 		return
 	}
 
@@ -541,6 +541,33 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 			rf.VoteCount = 0
 			rf.persist()
 			return
+		}
+		if !reply.Success {
+			//if there was a mismatch in the prevlogindex/prevlogterm.
+			newNextIndex := rf.NextIndex[server]
+			conflictTerm := reply.ConflictTerm
+			conflictIndex := reply.ConflictIndex
+			if conflictTerm != -1 {
+				lastConflictIndex := -1
+				for i := len(rf.EventLogs) - 1; i >= 0; i-- {
+					if rf.EventLogs[i].Term == conflictTerm {
+						lastConflictIndex = i
+						break
+					}
+				}
+				if lastConflictIndex != -1 {
+					newNextIndex = lastConflictIndex + 1
+				} else if conflictIndex >= 1 {
+					newNextIndex = conflictIndex
+				}
+			} else if conflictIndex != -1 {
+				newNextIndex = conflictIndex
+			}
+			if newNextIndex < 1 {
+				newNextIndex = 1
+			}
+			rf.NextIndex[server] = newNextIndex
+			go rf.ReplicateLogsToFollower(server, rf.CurrentTerm)
 		}
 	}
 }
