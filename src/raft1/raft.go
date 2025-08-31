@@ -270,11 +270,6 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.CurrentTerm != term || rf.ServerState != Leader {
-			//log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
-			rf.VoteCount = 0
-			rf.VotedFor = -1
-			rf.ServerState = Follower
-			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
@@ -355,7 +350,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				continue
 			} else {
 				//backoff logic. skip over all the same terms, to reduce the number of RPC calls.
-				newNextIndex := rf.NextIndex[server] - 1
+				newNextIndex := rf.NextIndex[server]
 				conflictTerm := reply.ConflictTerm
 				conflictIndex := reply.ConflictIndex
 				if conflictTerm != -1 {
@@ -567,7 +562,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 				newNextIndex = 1
 			}
 			rf.NextIndex[server] = newNextIndex
-			go rf.ReplicateLogsToFollower(server, rf.CurrentTerm)
+			//go rf.ReplicateLogsToFollower(server, rf.CurrentTerm)
 		}
 	}
 }
