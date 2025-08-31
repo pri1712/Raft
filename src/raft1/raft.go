@@ -56,7 +56,7 @@ type Raft struct {
 	ElectionTimeout time.Duration
 	LastHeartBeat   time.Time
 	VoteCount       int
-	StopHeartBeat   chan bool
+	StopHeartBeat   chan struct{}
 	// Look at the paper's Figure 2 for a description of what
 	// ServerState a Raft server must maintain.
 	//to talk to the application
@@ -318,6 +318,10 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				rf.VotedFor = -1
 				rf.VoteCount = 0
 				rf.ServerState = Follower
+				if rf.StopHeartBeat != nil {
+					close(rf.StopHeartBeat)
+					rf.StopHeartBeat = nil
+				}
 				rf.persist()
 				rf.mu.Unlock()
 				return
@@ -520,7 +524,10 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 		return
 	}
 	prevlogindex := rf.NextIndex[server] - 1
-	prevlogterm := rf.EventLogs[prevlogindex].Term
+	prevlogterm := 0
+	if prevlogindex >= 0 {
+		prevlogterm = rf.EventLogs[prevlogindex].Term
+	}
 	request := &AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     leaderId,
@@ -574,7 +581,7 @@ func (rf *Raft) SendHeartbeatImmediate() {
 
 }
 
-func (rf *Raft) PeriodicHeartbeats() {
+func (rf *Raft) PeriodicHeartbeats(stopCh chan struct{}) {
 	heartbeatInterval := 100 * time.Millisecond //to try and reduce RPC count.
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -593,6 +600,8 @@ func (rf *Raft) PeriodicHeartbeats() {
 			rf.mu.Unlock()
 			//log.Printf("Sending out heartbeats now")
 			rf.SendHeartbeatImmediate()
+		case <-stopCh:
+			return
 		}
 	}
 }
@@ -610,6 +619,10 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 		rf.VoteCount = 0
 		rf.ServerState = Follower
 		rf.persist()
+		if rf.StopHeartBeat != nil {
+			close(rf.StopHeartBeat)
+			rf.StopHeartBeat = nil
+		}
 		return
 	}
 	if rf.ServerState != Candidate || rf.CurrentTerm != originalTerm {
@@ -632,8 +645,12 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 				}
 				go rf.ReplicateLogsToFollower(i, rf.CurrentTerm)
 			}
+			if rf.StopHeartBeat != nil {
+				close(rf.StopHeartBeat)
+			}
+			rf.StopHeartBeat = make(chan struct{})
+			go rf.PeriodicHeartbeats(rf.StopHeartBeat)
 			log.Printf("Server %d became leader for term %d", rf.me, rf.CurrentTerm)
-			go rf.PeriodicHeartbeats()
 		}
 	}
 }
@@ -701,6 +718,7 @@ func (rf *Raft) StartElection() {
 	rf.ServerState = Candidate
 	rf.VotedFor = rf.me
 	rf.VoteCount = 1
+	rf.LastHeartBeat = time.Now()
 	lastLogIndex := len(rf.EventLogs) - 1
 	lastLogTerm := 0
 	if lastLogIndex >= 0 {
@@ -755,8 +773,9 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		timeElapsed := time.Since(rf.LastHeartBeat)
 		isLeader := rf.ServerState == Leader
+		electionTimeout := rf.ElectionTimeout
 		rf.mu.Unlock()
-		if !isLeader && timeElapsed > rf.ElectionTimeout {
+		if !isLeader && timeElapsed > electionTimeout {
 			rf.StartElection()
 			//started a leader election process.
 		}
@@ -799,7 +818,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.MatchIndex = make([]int, len(rf.peers))
 	//log.Printf("len of nextIndex: %v", len(rf.NextIndex))
 	rf.LastHeartBeat = time.Now()
-	rf.StopHeartBeat = make(chan bool, 1)
+	rf.StopHeartBeat = make(chan struct{})
 	// initialize from ServerState persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.Cond = sync.NewCond(&rf.mu)
