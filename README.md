@@ -6,7 +6,7 @@ Leader election and log replication have been implemented and are sufficiently p
 ### Implemented Features
 - Leader election with safety under concurrency and unreliable communication
 - Log replication across Raft replicas, ensuring consistency of client commands
+- Persistence of Raft state to disk to survive crashes and restarts
 
 ### Next Steps
-1. Implement snapshotting for efficient state transfer and log compaction
-2. Implement persistence to disk to survive process crashes and restarts
+1. Implement log compaction for efficient storage and retrieval of event logs for each server.
