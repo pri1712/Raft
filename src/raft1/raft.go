@@ -21,6 +21,7 @@ import (
 	"raft/src/labrpc"
 	"raft/src/raftapi"
 	"raft/src/tester1"
+	"raft/src/utils"
 )
 
 const (
@@ -270,12 +271,14 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.CurrentTerm != term || rf.ServerState != Leader {
+			//log.Printf("SendEventLogs failed: term %v, command %v", rf.CurrentTerm, eventCommand)
 			rf.mu.Unlock()
 			return
 		}
 		isLeader := rf.ServerState == Leader
 		me := rf.me
 		commitIndex := rf.CommitIndex
+
 		if isLeader {
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
 			if nextindex < 1 {
@@ -320,7 +323,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				return
 			}
 			if reply.Success {
-				log.Printf("Successfully appended logs to server %v from leader %v", server, me)
+				//log.Printf("Successfully appended logs to server %v", server)
 				//log.Printf("the logs are : %v", request.Entries)
 				match := request.PrevLogIndex + len(request.Entries)
 				if match > rf.MatchIndex[server] {
@@ -450,7 +453,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for i >= 0 && rf.EventLogs[i].Term == conflictTerm {
 			i--
 		}
-		reply.ConflictIndex = i + 1 //the index which has the term that is mismatched in the follower.
+		reply.ConflictIndex = i + 1 //mismatched index
 		return
 	}
 
@@ -491,6 +494,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//log.Printf("logs for node %v are : %v", rf.me, rf.EventLogs)
 	// heartbeat / reset election timer
 	rf.LastHeartBeat = time.Now()
+	rf.persist()
 	rf.ServerState = Follower
 	reply.Success = true
 	reply.Term = rf.CurrentTerm
@@ -503,10 +507,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 		return
 	}
 	prevlogindex := rf.NextIndex[server] - 1
-	prevlogterm := 0
-	if prevlogindex >= 0 {
-		prevlogterm = rf.EventLogs[prevlogindex].Term
-	}
+	prevlogterm := rf.EventLogs[prevlogindex].Term
 	request := &AppendEntriesArgs{
 		Term:         term,
 		LeaderId:     leaderId,
@@ -522,7 +523,6 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, reply)
 	if !ok {
 		//log.Printf("SendHeartBeatToPeers failed for server %v", server)
-		return
 	} else {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
@@ -536,33 +536,6 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 			rf.VoteCount = 0
 			rf.persist()
 			return
-		}
-		if !reply.Success {
-			//if there was a mismatch in the prevlogindex/prevlogterm.
-			newNextIndex := rf.NextIndex[server]
-			conflictTerm := reply.ConflictTerm
-			conflictIndex := reply.ConflictIndex
-			if conflictTerm != -1 {
-				lastConflictIndex := -1
-				for i := len(rf.EventLogs) - 1; i >= 0; i-- {
-					if rf.EventLogs[i].Term == conflictTerm {
-						lastConflictIndex = i
-						break
-					}
-				}
-				if lastConflictIndex != -1 {
-					newNextIndex = lastConflictIndex + 1
-				} else if conflictIndex >= 1 {
-					newNextIndex = conflictIndex
-				}
-			} else if conflictIndex != -1 {
-				newNextIndex = conflictIndex
-			}
-			if newNextIndex < 1 {
-				newNextIndex = 1
-			}
-			rf.NextIndex[server] = newNextIndex
-			//go rf.ReplicateLogsToFollower(server, rf.CurrentTerm)
 		}
 	}
 }
@@ -646,7 +619,6 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 				}
 				go rf.ReplicateLogsToFollower(i, rf.CurrentTerm)
 			}
-			rf.persist()
 			log.Printf("Server %d became leader for term %d", rf.me, rf.CurrentTerm)
 			go rf.PeriodicHeartbeats()
 		}
@@ -663,7 +635,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.Term < rf.CurrentTerm {
-		//the candidate has a lower term.
 		reply.Term = rf.CurrentTerm
 		//log.Printf("Term of candidate %d cannot be less than current Term %d\n", args.Term, rf.CurrentTerm)
 		return
@@ -707,6 +678,7 @@ func (rf *Raft) StartElection() {
 	//vote for self, increment the Term and send requestvote rpc
 	//log.Printf("Start Election")
 	rf.mu.Lock()
+	defer utils.RecoverWithStackTrace("StartElection", rf.me)
 	if rf.killed() {
 		rf.mu.Unlock()
 		return
