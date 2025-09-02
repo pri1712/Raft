@@ -63,6 +63,8 @@ type Raft struct {
 	ApplicationChanel chan raftapi.ApplyMsg
 	//to have conditional run of the applier whenever there is a change in the commit index.
 	Cond *sync.Cond
+	//to store the latest snapshot received from the application.
+	LatestSnapShot []byte
 }
 
 type AppendEntriesArgs struct {
@@ -133,7 +135,7 @@ func (rf *Raft) GetState() (int, bool) {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
+func (rf *Raft) persist(CurrentSnapshot []byte) {
 	//to save to the disk.
 	// Your code here (3C).
 	// Example:
@@ -161,7 +163,7 @@ func (rf *Raft) persist() {
 		return
 	}
 	raftState := writeBuffer.Bytes()
-	rf.persister.Save(raftState, nil)
+	rf.persister.Save(raftState, CurrentSnapshot)
 	//log.Printf("Successfully persisted all 3 state variables")
 }
 
@@ -218,6 +220,16 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.persist(snapshot)
+	//persisted to disk
+	//now gotta trim the event log.
+	if index+1 < len(rf.EventLogs) {
+		rf.EventLogs = rf.EventLogs[index+1:]
+	} else {
+		rf.EventLogs = nil
+	}
 
 }
 
@@ -322,7 +334,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					close(rf.StopHeartBeat)
 					rf.StopHeartBeat = nil
 				}
-				rf.persist()
+				rf.persist(nil)
 				rf.mu.Unlock()
 				return
 			}
@@ -411,7 +423,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader {
 		index = len(rf.EventLogs)
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
-		rf.persist()
+		rf.persist(nil)
 		//go rf.SendEventLogs(term, command)
 	} else {
 		return -1, term, false
@@ -443,7 +455,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 		rf.VoteCount = 0
-		rf.persist()
+		rf.persist(nil)
 	}
 
 	reply.Term = rf.CurrentTerm
@@ -495,7 +507,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			needsPersistence = true
 		}
 		if needsPersistence {
-			rf.persist()
+			rf.persist(nil)
 		}
 	}
 
@@ -554,7 +566,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 			rf.VotedFor = -1
 			rf.ServerState = Follower
 			rf.VoteCount = 0
-			rf.persist()
+			rf.persist(nil)
 			return
 		}
 	}
@@ -618,7 +630,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 		rf.VotedFor = -1
 		rf.VoteCount = 0
 		rf.ServerState = Follower
-		rf.persist()
+		rf.persist(nil)
 		if rf.StopHeartBeat != nil {
 			close(rf.StopHeartBeat)
 			rf.StopHeartBeat = nil
@@ -701,7 +713,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.LastHeartBeat = time.Now()
 	}
-	rf.persist()
+	rf.persist(nil)
 }
 
 func (rf *Raft) StartElection() {
@@ -724,7 +736,7 @@ func (rf *Raft) StartElection() {
 	if lastLogIndex >= 0 {
 		lastLogTerm = rf.EventLogs[lastLogIndex].Term
 	}
-	rf.persist()
+	rf.persist(nil)
 	rf.ElectionTimeout = time.Duration(rand.Intn(MaxTime-MinTime+1)+MinTime) * time.Millisecond
 	rf.mu.Unlock()
 	for i := range rf.peers {
