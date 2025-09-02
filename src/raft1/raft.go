@@ -64,7 +64,9 @@ type Raft struct {
 	//to have conditional run of the applier whenever there is a change in the commit index.
 	Cond *sync.Cond
 	//to store the latest snapshot received from the application.
-	LatestSnapShot []byte
+	LastIncludedTerm  int
+	LastIncludedIndex int
+	LastSnapshot      []byte
 }
 
 type AppendEntriesArgs struct {
@@ -220,17 +222,30 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	index = 0
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if index <= rf.LastIncludedIndex {
+		//we have already snapshotted this. reject.
+		log.Printf("Already snapshotted this")
+		return
+	}
+	startIndex := index - rf.LastIncludedIndex
+	if startIndex >= len(rf.EventLogs) || index > rf.LastApplied {
+		//cant be more than size of our event logs and also cant be after the last applied index, can only snapshot
+		//applied entries
+		return
+	}
+	// lastincludedindex index update.
+	rf.LastIncludedIndex = index
+	//lastincluded term update
+	rf.LastIncludedTerm = rf.EventLogs[startIndex].Term //position is relative to the prior last included index.
+	newEventLogs := []LogEntry{{0, nil}}
+	newEventLogs = append([]LogEntry(nil), rf.EventLogs[startIndex+1:]...)
+	rf.EventLogs = newEventLogs
 	rf.persist(snapshot)
 	//persisted to disk
-	//now gotta trim the event log.
-	if index+1 < len(rf.EventLogs) {
-		rf.EventLogs = rf.EventLogs[index+1:]
-	} else {
-		rf.EventLogs = nil
-	}
-
+	//now gotta trim the event logs.
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -834,6 +849,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from ServerState persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.Cond = sync.NewCond(&rf.mu)
+	rf.LastIncludedTerm = 0
+	rf.LastIncludedIndex = 0
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applier()
