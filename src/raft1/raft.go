@@ -238,6 +238,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//log.Printf("snapshot index: %v, snapshot: %v", index, snapshot)
+	log.Printf("snapshotting now")
 	if index <= rf.LastIncludedIndex {
 		//we have already snapshotted this. reject.
 		log.Printf("Already snapshotted this")
@@ -558,7 +559,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.LastHeartBeat = time.Now()
 	reply.Success = true
 	reply.Term = rf.CurrentTerm
-
 }
 
 func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
@@ -808,6 +808,7 @@ func (rf *Raft) applier() {
 			newidx := rf.GetLogIndex(idx)
 			//log.Printf("idx is %v", idx)
 			cmd := rf.EventLogs[newidx].Command
+			log.Printf("logs for server %d are %v", rf.me, rf.EventLogs)
 			msg := raftapi.ApplyMsg{CommandValid: true, Command: cmd, CommandIndex: idx}
 			rf.mu.Unlock()
 			rf.ApplicationChanel <- msg
