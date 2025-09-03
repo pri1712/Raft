@@ -130,13 +130,13 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-// GetLogIndex must be called from within a lock.
-func (rf *Raft) GetLogIndex(index int) int {
+// GetSnapshotLogIndex must be called from within a lock.
+func (rf *Raft) GetSnapshotLogIndex(index int) int {
 	return index - rf.LastIncludedIndex
 }
 
-// GetLogTerm must be called from within a lock.
-func (rf *Raft) GetLogTerm(index int) int {
+// GetSnapshotLogTerm must be called from within a lock.
+func (rf *Raft) GetSnapshotLogTerm(index int) int {
 	if index == rf.LastIncludedIndex {
 		return rf.LastIncludedTerm
 	}
@@ -175,6 +175,16 @@ func (rf *Raft) persist(CurrentSnapshot []byte) {
 	err = encoder.Encode(rf.EventLogs)
 	if err != nil {
 		log.Printf("error encoding event logs: %v", err)
+		return
+	}
+	err = encoder.Encode(rf.LastIncludedTerm)
+	if err != nil {
+		log.Printf("error encoding last log term: %v", err)
+		return
+	}
+	err = encoder.Encode(rf.LastIncludedIndex)
+	if err != nil {
+		log.Printf("error encoding last log index: %v", err)
 		return
 	}
 	raftState := writeBuffer.Bytes()
@@ -237,14 +247,14 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//log.Printf("snapshot index: %v, snapshot: %v", index, snapshot)
+	log.Printf("snapshot index: %v", index)
 	log.Printf("snapshotting now")
 	if index <= rf.LastIncludedIndex {
-		//we have already snapshotted this. reject.
+		//we have already created a snapshot of this. reject.
 		log.Printf("Already snapshotted this")
 		return
 	}
-	startIndex := index - rf.LastIncludedIndex
+	startIndex := rf.GetSnapshotLogIndex(index) //normalizing the index access.
 	if startIndex >= len(rf.EventLogs) || index > rf.LastApplied {
 		//cant be more than size of our event logs and also cant be after the last applied index, can only snapshot
 		//applied entries.
@@ -254,12 +264,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.LastIncludedIndex = index
 	//lastincluded term update
 	rf.LastIncludedTerm = rf.EventLogs[startIndex].Term //position is relative to the prior last included index.
-	newEventLogs := []LogEntry{{0, nil}}
+	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
 	newEventLogs = append(newEventLogs, rf.EventLogs[startIndex+1:]...)
 	rf.EventLogs = newEventLogs
 	rf.persist(snapshot)
 	//persisted to disk
-	//now gotta trim the event logs.
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -325,7 +334,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			if nextindex < 1 {
 				nextindex = 1
 			}
-			snapshotNextIndex := rf.GetLogIndex(nextindex)
+			snapshotNextIndex := rf.GetSnapshotLogIndex(nextindex)
 			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
 			prevlogindex := snapshotNextIndex - 1
 			prevlogterm := 0
@@ -568,7 +577,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 		return
 	}
 	prevlogindex := rf.NextIndex[server] - 1
-	snapshotPrevLogIndex := rf.GetLogIndex(prevlogindex)
+	snapshotPrevLogIndex := rf.GetSnapshotLogIndex(prevlogindex)
 	prevlogterm := 0
 	if prevlogindex >= 0 {
 		prevlogterm = rf.EventLogs[snapshotPrevLogIndex].Term
@@ -805,7 +814,7 @@ func (rf *Raft) applier() {
 			//log.Printf("Last included index is %d", rf.LastIncludedIndex)
 			//log.Printf("event logs: %v", rf.EventLogs)
 			idx := rf.LastApplied
-			newidx := rf.GetLogIndex(idx)
+			newidx := rf.GetSnapshotLogIndex(idx)
 			//log.Printf("idx is %v", idx)
 			cmd := rf.EventLogs[newidx].Command
 			log.Printf("logs for server %d are %v", rf.me, rf.EventLogs)
