@@ -334,17 +334,18 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			if nextindex < 1 {
 				nextindex = 1
 			}
-			snapshotNextIndex := rf.GetSnapshotLogIndex(nextindex)
 			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
-			prevlogindex := snapshotNextIndex - 1
+			prevlogindex := nextindex - 1
+			log.Printf("previous log index: %v", prevlogindex)
 			prevlogterm := 0
 			if prevlogindex >= 0 && prevlogindex < len(rf.EventLogs) {
-				prevlogterm = rf.EventLogs[prevlogindex].Term
+				prevlogterm = rf.GetSnapshotLogTerm(prevlogindex)
 			}
 			//log.Printf("here")
 			//log.Printf("nextindex : %v", nextindex)
-			sendEntries := append([]LogEntry(nil), rf.EventLogs[snapshotNextIndex:]...)
-			//log.Printf("SendEventLogs for server %v : %v", me, sendEntries)
+			sendEntries := append([]LogEntry(nil), rf.EventLogs[nextindex-rf.LastIncludedIndex:]...)
+			log.Printf("sending entries %v from server %v", sendEntries, rf.me)
+			log.Printf("event logs for server %v are %v", rf.me, rf.EventLogs)
 			//log.Printf("here2")
 			request := AppendEntriesArgs{
 				Term:         term,
@@ -391,8 +392,10 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					rf.NextIndex[server] = match + 1
 				}
 
-				for N := rf.CommitIndex + 1; N < len(rf.EventLogs); N++ {
-					if rf.EventLogs[N].Term != rf.CurrentTerm {
+				//max possible real index if there was no normalization due to snapshotting.
+				maxRealIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
+				for N := rf.CommitIndex + 1; N <= maxRealIndex; N++ {
+					if rf.GetSnapshotLogTerm(N) != rf.CurrentTerm {
 						continue
 					}
 					cnt := 1 // include leader
@@ -463,7 +466,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.CurrentTerm
 	isLeader := rf.ServerState == Leader
 	if isLeader {
-		index = len(rf.EventLogs)
+		index = len(rf.EventLogs) + rf.LastIncludedIndex
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
 		rf.persist(nil)
 		//go rf.SendEventLogs(term, command)
@@ -508,10 +511,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// consistency check: PrevLogIndex must exist and match PrevLogTerm
-	if args.PrevLogIndex >= len(rf.EventLogs) {
-		reply.ConflictIndex = len(rf.EventLogs)
+	maxRealIndex := rf.LastIncludedIndex + (len(rf.EventLogs) - 1)
+	//if the prevlogindex is itself greater than the last index possible of the current node due to missed entries.
+	if args.PrevLogIndex > maxRealIndex {
+		reply.ConflictIndex = rf.LastIncludedIndex + len(rf.EventLogs)
 		return
 	}
+	//if args.PrevLogIndex < rf.LastIncludedIndex {
+	//	// Handle snapshot case - need InstallSnapshot RPC
+	//	return
+	//}
 	if args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		conflictTerm := rf.EventLogs[args.PrevLogIndex].Term
 		reply.ConflictTerm = conflictTerm
@@ -577,10 +586,9 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 		return
 	}
 	prevlogindex := rf.NextIndex[server] - 1
-	snapshotPrevLogIndex := rf.GetSnapshotLogIndex(prevlogindex)
 	prevlogterm := 0
-	if prevlogindex >= 0 {
-		prevlogterm = rf.EventLogs[snapshotPrevLogIndex].Term
+	if prevlogindex >= rf.LastIncludedIndex {
+		prevlogterm = rf.GetSnapshotLogTerm(prevlogindex)
 	}
 	request := &AppendEntriesArgs{
 		Term:         term,
@@ -739,7 +747,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//the log with the later(greater term number) Term is more up-to-date. If the logs
 	//end with the same Term, then whichever log is longer is
 	//more up-to-date
-	nodeLastLogIndex := len(rf.EventLogs) - 1
+	nodeLastLogIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
 	nodeLastLogTerm := 0
 	if nodeLastLogIndex >= 0 {
 		nodeLastLogTerm = rf.EventLogs[nodeLastLogIndex].Term
@@ -773,7 +781,7 @@ func (rf *Raft) StartElection() {
 	rf.VotedFor = rf.me
 	rf.VoteCount = 1
 	rf.LastHeartBeat = time.Now()
-	lastLogIndex := len(rf.EventLogs) - 1
+	lastLogIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
 	lastLogTerm := 0
 	if lastLogIndex >= 0 {
 		lastLogTerm = rf.EventLogs[lastLogIndex].Term
@@ -817,7 +825,7 @@ func (rf *Raft) applier() {
 			newidx := rf.GetSnapshotLogIndex(idx)
 			//log.Printf("idx is %v", idx)
 			cmd := rf.EventLogs[newidx].Command
-			log.Printf("logs for server %d are %v", rf.me, rf.EventLogs)
+			//log.Printf("logs for server %d are %v", rf.me, rf.EventLogs)
 			msg := raftapi.ApplyMsg{CommandValid: true, Command: cmd, CommandIndex: idx}
 			rf.mu.Unlock()
 			rf.ApplicationChanel <- msg
