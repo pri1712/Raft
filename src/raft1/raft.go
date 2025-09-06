@@ -541,31 +541,50 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictIndex = i + 1 + rf.LastIncludedIndex //mismatched index
 		return
 	}
+	prevRelIdx := rf.GetSnapshotLogIndex(args.PrevLogIndex)
+	prevRelTerm := rf.GetSnapshotLogTerm(args.PrevLogIndex)
+	//compare prevrelterm and the prevterm sent by the leader to see if they match.
+	if prevRelTerm != args.PrevLogTerm {
+		reply.ConflictTerm = prevRelTerm
+		conflictTerm := reply.ConflictTerm
+		relI := prevRelIdx
+		for relI >= 0 && rf.EventLogs[relI].Term == conflictTerm {
+			relI--
+		}
+		firstConflictAbs := relI + 1 + rf.LastIncludedIndex //converting to absolute indexing
+		reply.ConflictIndex = firstConflictAbs
+		return
+	}
 
 	// Append / overwrite entries starting at insert index
-	insert := args.PrevLogIndex + 1
+	insertAbsolute := args.PrevLogIndex + 1
 	if len(args.Entries) > 0 {
 		needsPersistence := false
 		//basically is  a log replication RPC not a heartbeat one.
 		// find first position where entries diverge
 		firstDiff := -1
 		for i := 0; i < len(args.Entries); i++ {
-			fIdx := insert + i
-			if fIdx >= len(rf.EventLogs) {
+			fIdx := insertAbsolute + i
+			if fIdx > maxRealIndex {
 				firstDiff = i
 				break
 			}
-			if rf.EventLogs[rf.GetSnapshotLogIndex(fIdx)].Term != args.Entries[i].Term {
+			fTerm := rf.GetSnapshotLogTerm(fIdx)
+			if fTerm != args.Entries[i].Term {
 				firstDiff = i
 				break
 			}
 		}
 		if firstDiff != -1 {
 			// truncate follower log at divergence point and append remaining leader entries
-			truncIndex := insert + firstDiff
-			rf.EventLogs = rf.EventLogs[:truncIndex]
-			rf.EventLogs = append(rf.EventLogs, args.Entries[firstDiff:]...)
+			truncAbsolute := firstDiff + insertAbsolute
+			truncRel := rf.GetSnapshotLogIndex(truncAbsolute)
+			if truncRel < 0 {
+				truncRel = 0
+			}
+			rf.EventLogs = append(rf.EventLogs[:truncRel], args.Entries[firstDiff:]...)
 			needsPersistence = true
+			maxRealIndex = rf.LastIncludedIndex + (len(rf.EventLogs) - 1)
 		}
 		if needsPersistence {
 			rf.persist(nil)
@@ -598,6 +617,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 	prevlogindex := rf.NextIndex[server] - 1
 	prevlogterm := 0
 	if prevlogindex >= rf.LastIncludedIndex {
+		//to avoid negative slice access.
 		prevlogterm = rf.GetSnapshotLogTerm(prevlogindex)
 	}
 	request := &AppendEntriesArgs{
@@ -709,10 +729,10 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 			rf.ServerState = Leader
 			for i, _ := range rf.peers {
 				//log.Printf("len of eventLogs: %v", len(rf.EventLogs))
-				rf.NextIndex[i] = len(rf.EventLogs)
+				rf.NextIndex[i] = len(rf.EventLogs) + rf.LastIncludedIndex
 				rf.MatchIndex[i] = 0
 				if i == rf.me {
-					rf.MatchIndex[i] = len(rf.EventLogs) - 1
+					rf.MatchIndex[i] = len(rf.EventLogs) + rf.LastIncludedIndex - 1
 					continue
 				}
 				go rf.ReplicateLogsToFollower(i, rf.CurrentTerm)
@@ -760,7 +780,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	nodeLastLogIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
 	nodeLastLogTerm := 0
 	if nodeLastLogIndex >= 0 {
-		nodeLastLogTerm = rf.EventLogs[nodeLastLogIndex].Term
+		nodeLastLogTerm = rf.GetSnapshotLogTerm(nodeLastLogIndex)
 	}
 
 	upToDate := false
@@ -794,7 +814,7 @@ func (rf *Raft) StartElection() {
 	lastLogIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
 	lastLogTerm := 0
 	if lastLogIndex >= 0 {
-		lastLogTerm = rf.EventLogs[lastLogIndex].Term
+		lastLogTerm = rf.GetSnapshotLogTerm(lastLogIndex)
 	}
 	rf.persist(nil)
 	rf.ElectionTimeout = time.Duration(rand.Intn(MaxTime-MinTime+1)+MinTime) * time.Millisecond
