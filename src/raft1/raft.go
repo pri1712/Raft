@@ -342,7 +342,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			prevlogindex := nextindex - 1
 			log.Printf("previous log index: %v", prevlogindex)
 			prevlogterm := 0
-			if prevlogindex >= 0 && prevlogindex < len(rf.EventLogs) {
+			if prevlogindex >= rf.LastIncludedIndex {
 				prevlogterm = rf.GetSnapshotLogTerm(prevlogindex)
 			}
 			//log.Printf("here")
