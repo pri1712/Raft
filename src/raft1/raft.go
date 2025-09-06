@@ -84,6 +84,19 @@ type AppendEntriesReply struct {
 	ConflictIndex int
 	ConflictTerm  int
 }
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	SnapshotData      []byte
+	LastIncludedIndex int
+	LastIncludedTerm  int
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
 type State int
 
 type LogEntry struct {
@@ -319,6 +332,10 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) InstallSnapshot() {
+
 }
 
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
