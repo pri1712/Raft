@@ -220,7 +220,9 @@ func (rf *Raft) readPersist(data []byte) {
 	var CurrentTerm int
 	var VotedFor int
 	var EventLogs []LogEntry
-	if decoder.Decode(&CurrentTerm) != nil || decoder.Decode(&VotedFor) != nil || decoder.Decode(&EventLogs) != nil {
+	var LastIncludedIndex int
+	var LastIncludedTerm int
+	if decoder.Decode(&CurrentTerm) != nil || decoder.Decode(&VotedFor) != nil || decoder.Decode(&EventLogs) != nil || decoder.Decode(&LastIncludedIndex) != nil || decoder.Decode(&LastIncludedTerm) != nil {
 		log.Printf("readPersist failed while decoding")
 	} else {
 		rf.CurrentTerm = CurrentTerm
@@ -229,6 +231,8 @@ func (rf *Raft) readPersist(data []byte) {
 		log.Printf("loaded voted for: %v", VotedFor)
 		rf.EventLogs = EventLogs
 		log.Printf("loaded event logs: %v", EventLogs)
+		rf.LastIncludedIndex = LastIncludedIndex
+		rf.LastIncludedTerm = LastIncludedTerm
 	}
 }
 
@@ -418,9 +422,11 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				conflictTerm := reply.ConflictTerm
 				conflictIndex := reply.ConflictIndex
 				if conflictTerm != -1 {
+					//there is some term that is conflicting.
 					lastConflictIndex := -1
-					for i := len(rf.EventLogs) - 1; i >= 0; i-- {
-						if rf.EventLogs[i].Term == conflictTerm {
+					maxRealIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
+					for i := maxRealIndex; i >= 0; i-- {
+						if rf.EventLogs[rf.GetSnapshotLogIndex(i)].Term == conflictTerm {
 							lastConflictIndex = i
 							break
 						}
@@ -514,21 +520,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	maxRealIndex := rf.LastIncludedIndex + (len(rf.EventLogs) - 1)
 	//if the prevlogindex is itself greater than the last index possible of the current node due to missed entries.
 	if args.PrevLogIndex > maxRealIndex {
-		reply.ConflictIndex = rf.LastIncludedIndex + len(rf.EventLogs)
+		reply.ConflictIndex = maxRealIndex + 1
 		return
 	}
-	//if args.PrevLogIndex < rf.LastIncludedIndex {
-	//	// Handle snapshot case - need InstallSnapshot RPC
-	//	return
-	//}
-	if args.PrevLogIndex >= 0 && rf.EventLogs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		conflictTerm := rf.EventLogs[args.PrevLogIndex].Term
+
+	if rf.LastIncludedIndex > args.PrevLogIndex {
+		//Handle snapshot case - need InstallSnapshot RPC
+		reply.ConflictIndex = rf.LastIncludedIndex
+		reply.ConflictTerm = -1
+		return
+	}
+
+	if args.PrevLogIndex >= 0 && rf.EventLogs[rf.GetSnapshotLogIndex(args.PrevLogIndex)].Term != args.PrevLogTerm {
+		conflictTerm := rf.EventLogs[rf.GetSnapshotLogIndex(args.PrevLogIndex)].Term
 		reply.ConflictTerm = conflictTerm
-		i := args.PrevLogIndex
+		i := args.PrevLogIndex - rf.LastIncludedIndex
 		for i >= 0 && rf.EventLogs[i].Term == conflictTerm {
 			i--
 		}
-		reply.ConflictIndex = i + 1 //mismatched index
+		reply.ConflictIndex = i + 1 + rf.LastIncludedIndex //mismatched index
 		return
 	}
 
@@ -545,7 +555,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				firstDiff = i
 				break
 			}
-			if rf.EventLogs[fIdx].Term != args.Entries[i].Term {
+			if rf.EventLogs[rf.GetSnapshotLogIndex(fIdx)].Term != args.Entries[i].Term {
 				firstDiff = i
 				break
 			}
