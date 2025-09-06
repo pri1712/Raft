@@ -8,10 +8,12 @@ package raft
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"raft/src/labgob"
 	//	"bytes"
 	"math/rand"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -149,8 +151,22 @@ func (rf *Raft) GetState() (int, bool) {
 //}
 
 // GetSnapshotLogIndex must be called from within a lock.
-func (rf *Raft) GetSnapshotLogIndex(index int) int {
-	rel := index - rf.LastIncludedIndex
+func (rf *Raft) GetSnapshotLogIndex(abs int) int {
+	rel := abs - rf.LastIncludedIndex
+	if rel < 0 || rel >= len(rf.EventLogs) {
+		pc, file, line, ok := runtime.Caller(1)
+		if !ok {
+			log.Printf("Error while getting function callerr")
+			return -1
+		}
+		f := runtime.FuncForPC(pc)
+		if f == nil {
+			fmt.Println("Could not get function details")
+			return -1
+		}
+		log.Printf("Called by: %s (File: %s, Line: %d)\n", f.Name(), file, line)
+		log.Printf("[INDEX ERROR] abs=%d lastInc=%d rel=%d len=%d", abs, rf.LastIncludedIndex, rel, len(rf.EventLogs))
+	}
 	return rel
 }
 
@@ -160,6 +176,9 @@ func (rf *Raft) GetSnapshotLogTerm(index int) int {
 		return rf.LastIncludedTerm
 	}
 	rel := index - rf.LastIncludedIndex
+	if rel < 0 {
+		log.Println("GetSnapshotLogTerm out of boundary")
+	}
 	return rf.EventLogs[rel].Term
 }
 
@@ -266,7 +285,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		return
 	}
 	startIndex := rf.GetSnapshotLogIndex(index) //normalizing the index access.
-	if startIndex >= len(rf.EventLogs) || index > rf.LastApplied {
+	if startIndex < 0 || startIndex >= len(rf.EventLogs) || index > rf.LastApplied {
 		//cant be more than size of our event logs and also cant be after the last applied index, can only snapshot
 		//applied entries.
 		return
@@ -305,6 +324,7 @@ func (rf *Raft) killed() bool {
 
 // InstallSnapshot this is on the receiving end of the installsnapshot RPC, have to handle edge cases and trim logs.
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	log.Println("InstallSnapshot called")
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -318,6 +338,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 	if args.LastIncludedIndex <= rf.LastIncludedIndex {
+		//this has already been snapshotted to disallow out of order snapshot msgs.
 		return
 	}
 	relIndex := rf.GetSnapshotLogIndex(args.LastIncludedIndex)
@@ -337,6 +358,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// Reset logs: only keep a dummy entry at snapshot boundary
 	log.Printf("in installsnapshot")
 	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
+	log.Printf("relIndex: %v", relIndex)
 	newEventLogs = append(newEventLogs, rf.EventLogs[relIndex+1:]...)
 
 	// Advance commit/applied
@@ -346,16 +368,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	// Persist state + snapshot
 	rf.persist(args.SnapshotData)
-	msg := raftapi.ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.SnapshotData,
-		SnapshotTerm:  rf.LastIncludedTerm,
-		SnapshotIndex: rf.LastIncludedIndex,
-	}
-
-	go func() {
-		rf.ApplicationChanel <- msg
-	}()
 }
 
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
@@ -386,6 +398,8 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			}
 			//log.Printf("here")
 			//log.Printf("nextindex : %v", nextindex)
+
+			//send an installsnapshot rpc.
 			if nextindex <= rf.LastIncludedIndex {
 				request := InstallSnapshotArgs{
 					Term:              term,
@@ -513,7 +527,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					}
 					lastConflictIndex := -1
 					maxRealIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
-					for i := maxRealIndex; i >= 0; i-- {
+					for i := maxRealIndex; i > 0; i-- {
 						//log.Printf("here in ReplicateLogsToFollower2")
 						if rf.EventLogs[rf.GetSnapshotLogIndex(i)].Term == conflictTerm {
 							lastConflictIndex = i
@@ -669,9 +683,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if firstDiff != -1 {
-			// truncate follower log at divergence point and append remaining leader entries
+			// runcate follower log at divergence point and append remaining leader entries
 			truncAbsolute := firstDiff + insertAbsolute
-			log.Printf("firstd diff %v", firstDiff)
+			log.Printf("firstd diff and insertabsolute %v,%v", firstDiff, insertAbsolute)
 			truncRel := rf.GetSnapshotLogIndex(truncAbsolute)
 			if truncRel < 0 {
 				truncRel = 0
