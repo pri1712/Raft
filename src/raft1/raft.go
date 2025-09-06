@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"log"
 	"raft/src/labgob"
-
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -84,6 +83,19 @@ type AppendEntriesReply struct {
 	ConflictIndex int
 	ConflictTerm  int
 }
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	SnapshotData      []byte
+	LastIncludedIndex int
+	LastIncludedTerm  int
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
 type State int
 
 type LogEntry struct {
@@ -130,17 +142,25 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+//func dumpAndPanic(format string, args ...interface{}) {
+//	log.Printf("[INDEX ERROR] "+format, args...)
+//	log.Printf("[STACK TRACE]\n%s", debug.Stack())
+//	panic("invalid index detected in Raft")
+//}
+
 // GetSnapshotLogIndex must be called from within a lock.
 func (rf *Raft) GetSnapshotLogIndex(index int) int {
-	return index - rf.LastIncludedIndex
+	rel := index - rf.LastIncludedIndex
+	return rel
 }
 
-// GetSnapshotLogTerm must be called from within a lock.
+// GetSnapshotLogTerm must be calle from within a lock
 func (rf *Raft) GetSnapshotLogTerm(index int) int {
 	if index == rf.LastIncludedIndex {
 		return rf.LastIncludedTerm
 	}
-	return rf.EventLogs[index-rf.LastIncludedIndex].Term
+	rel := index - rf.LastIncludedIndex
+	return rf.EventLogs[rel].Term
 }
 
 // save Raft's persistent ServerState to stable storage,
@@ -202,19 +222,6 @@ func (rf *Raft) readPersist(data []byte) {
 		log.Println("readPersist empty data")
 		return
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
 	readBuffer := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(readBuffer)
 	var CurrentTerm int
@@ -267,41 +274,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// lastincludedindex index update.
 	rf.LastIncludedIndex = index
 	//lastincluded term update
+	//log.Printf("here in Snapshot")
 	rf.LastIncludedTerm = rf.EventLogs[startIndex].Term //position is relative to the prior last included index.
 	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
+	//log.Printf("here in Snapshot2")
 	newEventLogs = append(newEventLogs, rf.EventLogs[startIndex+1:]...)
 	rf.EventLogs = newEventLogs
+	rf.LastSnapshot = snapshot
 	rf.persist(snapshot)
 	//persisted to disk
 }
-
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.Thus, there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
 
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
@@ -321,6 +303,61 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// InstallSnapshot this is on the receiving end of the installsnapshot RPC, have to handle edge cases and trim logs.
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.killed() {
+		return
+	}
+	reply.Term = rf.CurrentTerm
+
+	// Reject stale terms
+	if args.Term < rf.CurrentTerm {
+		return
+	}
+	if args.LastIncludedIndex <= rf.LastIncludedIndex {
+		return
+	}
+	relIndex := rf.GetSnapshotLogIndex(args.LastIncludedIndex)
+	// If leader term is higher, update term and convert to follower
+	if args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = args.Term
+		rf.VotedFor = -1
+		rf.ServerState = Follower
+		rf.VoteCount = 0
+	}
+
+	// Accept snapshot
+	rf.LastIncludedIndex = args.LastIncludedIndex
+	rf.LastIncludedTerm = args.LastIncludedTerm
+	rf.LastSnapshot = args.SnapshotData
+
+	// Reset logs: only keep a dummy entry at snapshot boundary
+	log.Printf("in installsnapshot")
+	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
+	newEventLogs = append(newEventLogs, rf.EventLogs[relIndex+1:]...)
+
+	// Advance commit/applied
+	if rf.CommitIndex < rf.LastIncludedIndex {
+		rf.CommitIndex = rf.LastIncludedIndex
+	}
+
+	// Persist state + snapshot
+	rf.persist(args.SnapshotData)
+	msg := raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.SnapshotData,
+		SnapshotTerm:  rf.LastIncludedTerm,
+		SnapshotIndex: rf.LastIncludedIndex,
+	}
+
+	go func() {
+		rf.ApplicationChanel <- msg
+	}()
+}
+
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -332,7 +369,9 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 		isLeader := rf.ServerState == Leader
 		me := rf.me
 		commitIndex := rf.CommitIndex
-
+		currentSnapshot := rf.LastSnapshot
+		lastIncludedTerm := rf.LastIncludedTerm
+		lastIncludedIndex := rf.LastIncludedIndex
 		if isLeader {
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
 			if nextindex < 1 {
@@ -340,16 +379,43 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			}
 			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
 			prevlogindex := nextindex - 1
-			log.Printf("previous log index: %v", prevlogindex)
+			//log.Printf("previous log index: %v", prevlogindex)
 			prevlogterm := 0
 			if prevlogindex >= rf.LastIncludedIndex {
 				prevlogterm = rf.GetSnapshotLogTerm(prevlogindex)
 			}
 			//log.Printf("here")
 			//log.Printf("nextindex : %v", nextindex)
+			if nextindex <= rf.LastIncludedIndex {
+				request := InstallSnapshotArgs{
+					Term:              term,
+					LeaderId:          me,
+					SnapshotData:      currentSnapshot,
+					LastIncludedIndex: lastIncludedIndex,
+					LastIncludedTerm:  lastIncludedTerm,
+				}
+				rf.mu.Unlock()
+				reply := InstallSnapshotReply{}
+				ok := rf.peers[server].Call("InstallSnapshot", &request, &reply)
+				if !ok {
+					log.Printf("InstallSnapshot failed for server: %v", server)
+					time.Sleep(50 * time.Millisecond)
+				} else {
+					rf.mu.Lock()
+					log.Printf("InstallSnapshot succeeded for server: %v", server)
+					rf.NextIndex[server] = rf.LastIncludedIndex + 1
+					rf.MatchIndex[server] = rf.LastIncludedIndex
+					rf.mu.Unlock()
+				}
+			}
+			if nextindex-rf.LastIncludedIndex < 0 || nextindex-rf.LastIncludedIndex > len(rf.EventLogs) {
+				log.Fatalf("[Leader %d] invalid slice: next=%d lastInc=%d len=%d",
+					rf.me, nextindex, rf.LastIncludedIndex, len(rf.EventLogs))
+			}
+			//log.Printf("here in ReplicateLogsToFollower")
 			sendEntries := append([]LogEntry(nil), rf.EventLogs[nextindex-rf.LastIncludedIndex:]...)
-			log.Printf("sending entries %v from server %v", sendEntries, rf.me)
-			log.Printf("event logs for server %v are %v", rf.me, rf.EventLogs)
+			//log.Printf("sending entries %v from server %v", sendEntries, rf.me)
+			//log.Printf("event logs for server %v are %v", rf.me, rf.EventLogs)
 			//log.Printf("here2")
 			request := AppendEntriesArgs{
 				Term:         term,
@@ -423,9 +489,32 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				conflictIndex := reply.ConflictIndex
 				if conflictTerm != -1 {
 					//there is some term that is conflicting.
+					if conflictIndex <= rf.LastIncludedIndex {
+						//install snapshot rpc needs to be sent.
+						request := InstallSnapshotArgs{
+							Term:              term,
+							LeaderId:          me,
+							SnapshotData:      currentSnapshot,
+							LastIncludedIndex: lastIncludedIndex,
+							LastIncludedTerm:  lastIncludedTerm,
+						}
+						rf.mu.Unlock()
+						reply := InstallSnapshotReply{}
+						ok := rf.peers[server].Call("InstallSnapshot", &request, &reply)
+						if !ok {
+							log.Printf("InstallSnapshot failed for server: %v", server)
+							time.Sleep(50 * time.Millisecond)
+						} else {
+							rf.mu.Lock()
+							log.Printf("InstallSnapshot succeeded for server: %v", server)
+							rf.NextIndex[server] = rf.LastIncludedIndex + 1
+							rf.MatchIndex[server] = rf.LastIncludedIndex
+						}
+					}
 					lastConflictIndex := -1
 					maxRealIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
 					for i := maxRealIndex; i >= 0; i-- {
+						//log.Printf("here in ReplicateLogsToFollower2")
 						if rf.EventLogs[rf.GetSnapshotLogIndex(i)].Term == conflictTerm {
 							lastConflictIndex = i
 							break
@@ -531,10 +620,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	//log.Printf("here in AppendEntries")
 	if args.PrevLogIndex >= 0 && rf.EventLogs[rf.GetSnapshotLogIndex(args.PrevLogIndex)].Term != args.PrevLogTerm {
+		//log.Printf("here in AppendEntries2")
 		conflictTerm := rf.EventLogs[rf.GetSnapshotLogIndex(args.PrevLogIndex)].Term
 		reply.ConflictTerm = conflictTerm
 		i := args.PrevLogIndex - rf.LastIncludedIndex
+		//log.Printf("here in AppendEntries3")
 		for i >= 0 && rf.EventLogs[i].Term == conflictTerm {
 			i--
 		}
@@ -548,6 +640,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictTerm = prevRelTerm
 		conflictTerm := reply.ConflictTerm
 		relI := prevRelIdx
+		//log.Printf("here in AppendEntries4")
 		for relI >= 0 && rf.EventLogs[relI].Term == conflictTerm {
 			relI--
 		}
@@ -578,10 +671,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if firstDiff != -1 {
 			// truncate follower log at divergence point and append remaining leader entries
 			truncAbsolute := firstDiff + insertAbsolute
+			log.Printf("firstd diff %v", firstDiff)
 			truncRel := rf.GetSnapshotLogIndex(truncAbsolute)
 			if truncRel < 0 {
 				truncRel = 0
 			}
+			//log.Printf("here in AppendEntries5")
 			rf.EventLogs = append(rf.EventLogs[:truncRel], args.Entries[firstDiff:]...)
 			needsPersistence = true
 			maxRealIndex = rf.LastIncludedIndex + (len(rf.EventLogs) - 1)
@@ -729,7 +824,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 			rf.ServerState = Leader
 			for i, _ := range rf.peers {
 				//log.Printf("len of eventLogs: %v", len(rf.EventLogs))
-				rf.NextIndex[i] = len(rf.EventLogs) + rf.LastIncludedIndex
+				rf.NextIndex[i] = len(rf.EventLogs) + rf.LastIncludedIndex - 1
 				rf.MatchIndex[i] = 0
 				if i == rf.me {
 					rf.MatchIndex[i] = len(rf.EventLogs) + rf.LastIncludedIndex - 1
@@ -853,12 +948,15 @@ func (rf *Raft) applier() {
 			//log.Printf("event logs: %v", rf.EventLogs)
 			idx := rf.LastApplied
 			newidx := rf.GetSnapshotLogIndex(idx)
+			//log.Printf("New index after normalization: %d", newidx)
 			//log.Printf("idx is %v", idx)
+			//log.Printf("here in applier")
 			cmd := rf.EventLogs[newidx].Command
 			//log.Printf("logs for server %d are %v", rf.me, rf.EventLogs)
 			msg := raftapi.ApplyMsg{CommandValid: true, Command: cmd, CommandIndex: idx}
 			rf.mu.Unlock()
 			rf.ApplicationChanel <- msg
+			//log.Printf("Applied command: %v", cmd)
 			rf.mu.Lock()
 		}
 		rf.mu.Unlock()
