@@ -284,6 +284,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
 	newEventLogs = append(newEventLogs, rf.EventLogs[startIndex+1:]...)
 	rf.EventLogs = newEventLogs
+	rf.LastSnapshot = snapshot
 	rf.persist(snapshot)
 	//persisted to disk
 }
@@ -334,8 +335,18 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) InstallSnapshot() {
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	if !rf.killed() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if args.Term < rf.CurrentTerm {
+			reply.Term = rf.CurrentTerm
+			log.Printf("Term of the node that sent installsnapshot is lower than current term")
+			return
+		}
+		//need the actual log replication logic here.
 
+	}
 }
 
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
@@ -349,7 +360,9 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 		isLeader := rf.ServerState == Leader
 		me := rf.me
 		commitIndex := rf.CommitIndex
-
+		currentSnapshot := rf.LastSnapshot
+		lastIncludedTerm := rf.LastIncludedTerm
+		lastIncludedIndex := rf.LastIncludedIndex
 		if isLeader {
 			nextindex := rf.NextIndex[server] //from where we have to send the logs to this server
 			if nextindex < 1 {
@@ -357,7 +370,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			}
 			//log.Printf("SendEventLogs peers[%v]: nextindex: %v", server, nextindex)
 			prevlogindex := nextindex - 1
-			log.Printf("previous log index: %v", prevlogindex)
+			//log.Printf("previous log index: %v", prevlogindex)
 			prevlogterm := 0
 			if prevlogindex >= rf.LastIncludedIndex {
 				prevlogterm = rf.GetSnapshotLogTerm(prevlogindex)
@@ -365,8 +378,8 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			//log.Printf("here")
 			//log.Printf("nextindex : %v", nextindex)
 			sendEntries := append([]LogEntry(nil), rf.EventLogs[nextindex-rf.LastIncludedIndex:]...)
-			log.Printf("sending entries %v from server %v", sendEntries, rf.me)
-			log.Printf("event logs for server %v are %v", rf.me, rf.EventLogs)
+			//log.Printf("sending entries %v from server %v", sendEntries, rf.me)
+			//log.Printf("event logs for server %v are %v", rf.me, rf.EventLogs)
 			//log.Printf("here2")
 			request := AppendEntriesArgs{
 				Term:         term,
@@ -440,6 +453,28 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				conflictIndex := reply.ConflictIndex
 				if conflictTerm != -1 {
 					//there is some term that is conflicting.
+					if conflictIndex == rf.LastIncludedIndex {
+						//install snapshot rpc needs to be sent.
+						request := InstallSnapshotArgs{
+							Term:              term,
+							LeaderId:          me,
+							SnapshotData:      currentSnapshot,
+							LastIncludedIndex: lastIncludedIndex,
+							LastIncludedTerm:  lastIncludedTerm,
+						}
+						rf.mu.Unlock()
+						reply := InstallSnapshotReply{}
+						ok := rf.peers[server].Call("InstallSnapshot", &request, &reply)
+						if !ok {
+							log.Printf("InstallSnapshot failed for server: %v", server)
+							time.Sleep(50 * time.Millisecond)
+						} else {
+							rf.mu.Lock()
+							log.Printf("InstallSnapshot succeeded for server: %v", server)
+							rf.NextIndex[server] = rf.LastIncludedIndex + 1
+							rf.MatchIndex[server] = rf.LastIncludedIndex
+						}
+					}
 					lastConflictIndex := -1
 					maxRealIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
 					for i := maxRealIndex; i >= 0; i-- {
