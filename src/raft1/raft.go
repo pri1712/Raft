@@ -256,7 +256,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.VotedFor = VotedFor
 		log.Printf("loaded voted for: %v", VotedFor)
 		rf.EventLogs = EventLogs
-		log.Printf("loaded event logs: %v", EventLogs)
+		//log.Printf("loaded event logs: %v", EventLogs)
 		rf.LastIncludedIndex = LastIncludedIndex
 		rf.LastIncludedTerm = LastIncludedTerm
 	}
@@ -359,7 +359,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	log.Printf("in installsnapshot")
 	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
 	log.Printf("relIndex: %v", relIndex)
-	newEventLogs = append(newEventLogs, rf.EventLogs[relIndex+1:]...)
+	if relIndex+1 <= len(rf.EventLogs) {
+		newEventLogs = append(newEventLogs, rf.EventLogs[relIndex+1:]...)
+	}
 
 	// Advance commit/applied
 	if rf.CommitIndex < rf.LastIncludedIndex {
@@ -393,8 +395,10 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			prevlogindex := nextindex - 1
 			//log.Printf("previous log index: %v", prevlogindex)
 			prevlogterm := 0
-			if prevlogindex >= rf.LastIncludedIndex {
+			if prevlogindex >= lastIncludedIndex {
 				prevlogterm = rf.GetSnapshotLogTerm(prevlogindex)
+			} else {
+				prevlogterm = lastIncludedTerm
 			}
 			//log.Printf("here")
 			//log.Printf("nextindex : %v", nextindex)
@@ -421,6 +425,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					rf.MatchIndex[server] = rf.LastIncludedIndex
 					rf.mu.Unlock()
 				}
+				continue
 			}
 			if nextindex-rf.LastIncludedIndex < 0 || nextindex-rf.LastIncludedIndex > len(rf.EventLogs) {
 				log.Fatalf("[Leader %d] invalid slice: next=%d lastInc=%d len=%d",
@@ -527,8 +532,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					}
 					lastConflictIndex := -1
 					maxRealIndex := rf.LastIncludedIndex + len(rf.EventLogs) - 1
-					for i := maxRealIndex; i > 0; i-- {
-						//log.Printf("here in ReplicateLogsToFollower2")
+					for i := maxRealIndex; i > lastIncludedIndex; i-- {
 						if rf.EventLogs[rf.GetSnapshotLogIndex(i)].Term == conflictTerm {
 							lastConflictIndex = i
 							break
@@ -683,14 +687,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if firstDiff != -1 {
-			// runcate follower log at divergence point and append remaining leader entries
+			// truncate follower log at divergence point and append remaining leader entries
 			truncAbsolute := firstDiff + insertAbsolute
 			log.Printf("firstd diff and insertabsolute %v,%v", firstDiff, insertAbsolute)
+			log.Printf("server calling is %v", rf.me)
 			truncRel := rf.GetSnapshotLogIndex(truncAbsolute)
 			if truncRel < 0 {
 				truncRel = 0
 			}
 			//log.Printf("here in AppendEntries5")
+			//log.Printf("event logs upto truncrel: %v", rf.EventLogs[:truncRel])
 			rf.EventLogs = append(rf.EventLogs[:truncRel], args.Entries[firstDiff:]...)
 			needsPersistence = true
 			maxRealIndex = rf.LastIncludedIndex + (len(rf.EventLogs) - 1)
@@ -959,7 +965,7 @@ func (rf *Raft) applier() {
 			rf.LastApplied++
 			//log.Printf("Last applied index in the eventlog is %d", rf.LastApplied)
 			//log.Printf("Last included index is %d", rf.LastIncludedIndex)
-			//log.Printf("event logs: %v", rf.EventLogs)
+			log.Printf("event logs for server %v : %v", rf.me, rf.EventLogs)
 			idx := rf.LastApplied
 			newidx := rf.GetSnapshotLogIndex(idx)
 			//log.Printf("New index after normalization: %d", newidx)
