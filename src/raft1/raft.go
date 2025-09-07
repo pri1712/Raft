@@ -254,8 +254,16 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.CurrentTerm = CurrentTerm
 		rf.VotedFor = VotedFor
 		rf.EventLogs = EventLogs
-		rf.LastIncludedIndex = LastIncludedIndex
 		rf.LastIncludedTerm = LastIncludedTerm
+		rf.LastIncludedIndex = LastIncludedIndex
+		if rf.persister.SnapshotSize() != 0 {
+			rf.LastSnapshot = rf.persister.ReadSnapshot()
+		}
+		if rf.LastIncludedIndex > 0 {
+			rf.CommitIndex = rf.LastIncludedIndex
+			rf.LastApplied = rf.LastIncludedIndex
+		}
+		log.Printf("persisted logs for server %d are %v", rf.me, rf.EventLogs)
 	}
 }
 
@@ -354,7 +362,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	oldEventLogs := rf.EventLogs
 	oldLastIncludedIndex := rf.LastIncludedIndex
-
 	// relative index of snapshot boundary in old logs
 	relIndex := args.LastIncludedIndex - oldLastIncludedIndex
 	//dummy entry + entries after the snapshot point.
@@ -1013,7 +1020,7 @@ func (rf *Raft) ticker() {
 		timeElapsed := time.Since(rf.LastHeartBeat)
 		isLeader := rf.ServerState == Leader
 		electionTimeout := rf.ElectionTimeout
-		//log.Printf("event logs for server %v are %v ", rf.me, rf.EventLogs)
+		log.Printf("event logs for server %v are %v ", rf.me, rf.EventLogs)
 		rf.mu.Unlock()
 		if !isLeader && timeElapsed > electionTimeout {
 			rf.StartElection()
