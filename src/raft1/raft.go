@@ -325,24 +325,24 @@ func (rf *Raft) killed() bool {
 // InstallSnapshot this is on the receiving end of the installsnapshot RPC, have to handle edge cases and trim logs.
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	log.Println("InstallSnapshot called")
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
+	rf.mu.Lock()
 	if rf.killed() {
+		rf.mu.Unlock()
 		return
 	}
 	reply.Term = rf.CurrentTerm
 
-	// Reject stale terms
 	if args.Term < rf.CurrentTerm {
+		rf.mu.Unlock()
 		return
 	}
 	if args.LastIncludedIndex <= rf.LastIncludedIndex {
-		//this has already been snapshotted to disallow out of order snapshot msgs.
+		rf.mu.Unlock()
 		return
 	}
-	relIndex := rf.GetSnapshotLogIndex(args.LastIncludedIndex)
-	// If leader term is higher, update term and convert to follower
+
+	// Update term if needed
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
@@ -350,28 +350,36 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.VoteCount = 0
 	}
 
-	// Accept snapshot
+	// Apply snapshot metadata
 	rf.LastIncludedIndex = args.LastIncludedIndex
 	rf.LastIncludedTerm = args.LastIncludedTerm
 	rf.LastSnapshot = args.SnapshotData
 
-	// Reset logs: only keep a dummy entry at snapshot boundary
+	// Reset logs
 	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
-	//log.Printf("relIndex: %v", relIndex)
-	if relIndex+1 <= len(rf.EventLogs) {
+	relIndex := rf.GetSnapshotLogIndex(args.LastIncludedIndex)
+	if relIndex >= 0 && relIndex+1 < len(rf.EventLogs) {
 		newEventLogs = append(newEventLogs, rf.EventLogs[relIndex+1:]...)
-	} else {
-		log.Printf("[OUT OF BOUNDS ACCESS] relIndex is higher than event logs length.")
 	}
+	rf.EventLogs = newEventLogs
 
-	// Advance commit/applied
+	// Update commit index
 	if rf.CommitIndex < rf.LastIncludedIndex {
 		rf.CommitIndex = rf.LastIncludedIndex
 	}
-
-	// Persist state + snapshot
+	rf.LastApplied = rf.CommitIndex
+	// Persist all updated state + snapshot
 	rf.persist(args.SnapshotData)
 
+	// apply to the applicn.
+	applymsg := raftapi.ApplyMsg{
+		Snapshot:      args.SnapshotData,
+		SnapshotIndex: rf.LastIncludedIndex,
+		SnapshotTerm:  rf.LastIncludedTerm,
+	}
+
+	rf.mu.Unlock()
+	rf.ApplicationChanel <- applymsg
 }
 
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
@@ -970,6 +978,8 @@ func (rf *Raft) applier() {
 			//log.Printf("Last included index is %d", rf.LastIncludedIndex)
 			log.Printf("event logs for server %v : %v", rf.me, rf.EventLogs)
 			idx := rf.LastApplied
+			log.Printf("last applied : %v", rf.LastApplied)
+			log.Printf("last included : %v", rf.LastIncludedIndex)
 			newidx := rf.GetSnapshotLogIndex(idx)
 			//log.Printf("New index after normalization: %d", newidx)
 			//log.Printf("idx is %v", idx)
