@@ -176,7 +176,7 @@ func (rf *Raft) GetSnapshotLogTerm(index int) int {
 		return rf.LastIncludedTerm
 	}
 	rel := index - rf.LastIncludedIndex
-	if rel < 0 {
+	if rel < 0 || rel >= len(rf.EventLogs) {
 		log.Println("GetSnapshotLogTerm out of boundary")
 	}
 	return rf.EventLogs[rel].Term
@@ -252,11 +252,8 @@ func (rf *Raft) readPersist(data []byte) {
 		log.Printf("readPersist failed while decoding")
 	} else {
 		rf.CurrentTerm = CurrentTerm
-		log.Printf("loaded current term %v", rf.CurrentTerm)
 		rf.VotedFor = VotedFor
-		log.Printf("loaded voted for: %v", VotedFor)
 		rf.EventLogs = EventLogs
-		//log.Printf("loaded event logs: %v", EventLogs)
 		rf.LastIncludedIndex = LastIncludedIndex
 		rf.LastIncludedTerm = LastIncludedTerm
 	}
@@ -297,6 +294,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.LastIncludedTerm = rf.EventLogs[startIndex].Term //position is relative to the prior last included index.
 	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
 	//log.Printf("here in Snapshot2")
+	if startIndex+1 > len(rf.EventLogs) {
+		log.Printf("[OUT OF BOUNDS ACCESS] startIndex is higher than event logs length.")
+	}
 	newEventLogs = append(newEventLogs, rf.EventLogs[startIndex+1:]...)
 	rf.EventLogs = newEventLogs
 	rf.LastSnapshot = snapshot
@@ -356,11 +356,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.LastSnapshot = args.SnapshotData
 
 	// Reset logs: only keep a dummy entry at snapshot boundary
-	log.Printf("in installsnapshot")
 	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
-	log.Printf("relIndex: %v", relIndex)
+	//log.Printf("relIndex: %v", relIndex)
 	if relIndex+1 <= len(rf.EventLogs) {
 		newEventLogs = append(newEventLogs, rf.EventLogs[relIndex+1:]...)
+	} else {
+		log.Printf("[OUT OF BOUNDS ACCESS] relIndex is higher than event logs length.")
 	}
 
 	// Advance commit/applied
@@ -370,6 +371,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	// Persist state + snapshot
 	rf.persist(args.SnapshotData)
+
 }
 
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
@@ -414,7 +416,8 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 				}
 				rf.mu.Unlock()
 				reply := InstallSnapshotReply{}
-				ok := rf.peers[server].Call("InstallSnapshot", &request, &reply)
+				//log.Printf("sending install snapshot request: %v", request)
+				ok := rf.peers[server].Call("Raft.InstallSnapshot", &request, &reply)
 				if !ok {
 					log.Printf("InstallSnapshot failed for server: %v", server)
 					time.Sleep(50 * time.Millisecond)
@@ -519,7 +522,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 						}
 						rf.mu.Unlock()
 						reply := InstallSnapshotReply{}
-						ok := rf.peers[server].Call("InstallSnapshot", &request, &reply)
+						ok := rf.peers[server].Call("Raft.InstallSnapshot", &request, &reply)
 						if !ok {
 							log.Printf("InstallSnapshot failed for server: %v", server)
 							time.Sleep(50 * time.Millisecond)
