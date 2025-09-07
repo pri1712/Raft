@@ -57,6 +57,7 @@ func (ps *Persister) Save(raftstate []byte, snapshot []byte) {
 	defer ps.mu.Unlock()
 	ps.raftstate = clone(raftstate)
 	ps.snapshot = clone(snapshot)
+	//log.Printf("Saving snapshot %v", ps.snapshot)
 	//log.Printf("saved snapshot size %v", len(ps.snapshot))
 }
 
