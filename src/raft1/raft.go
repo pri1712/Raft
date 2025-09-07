@@ -256,6 +256,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.EventLogs = EventLogs
 		rf.LastIncludedTerm = LastIncludedTerm
 		rf.LastIncludedIndex = LastIncludedIndex
+		log.Printf("snapshot size : %v", rf.persister.SnapshotSize())
 		if rf.persister.SnapshotSize() != 0 {
 			rf.LastSnapshot = rf.persister.ReadSnapshot()
 		}
@@ -274,10 +275,11 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
+// that index. Raft should now trim its log as much as possible
+// so basically trim it upto the last included index.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
