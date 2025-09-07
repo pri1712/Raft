@@ -8,12 +8,10 @@ package raft
 
 import (
 	"bytes"
-	"fmt"
 	"log"
 	"raft/src/labgob"
 	//	"bytes"
 	"math/rand"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -154,17 +152,17 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) GetSnapshotLogIndex(abs int) int {
 	rel := abs - rf.LastIncludedIndex
 	if rel < 0 || rel >= len(rf.EventLogs) {
-		pc, file, line, ok := runtime.Caller(1)
-		if !ok {
-			log.Printf("Error while getting function callerr")
-			return -1
-		}
-		f := runtime.FuncForPC(pc)
-		if f == nil {
-			fmt.Println("Could not get function details")
-			return -1
-		}
-		log.Printf("Called by: %s (File: %s, Line: %d)\n", f.Name(), file, line)
+		//pc, file, line, ok := runtime.Caller(1)
+		//if !ok {
+		//	log.Printf("Error while getting function callerr")
+		//	return -1
+		//}
+		//f := runtime.FuncForPC(pc)
+		//if f == nil {
+		//	fmt.Println("Could not get function details")
+		//	return -1
+		//}
+		//log.Printf("Called by: %s (File: %s, Line: %d)\n", f.Name(), file, line)
 		log.Printf("[INDEX ERROR] abs=%d lastInc=%d rel=%d len=%d", abs, rf.LastIncludedIndex, rel, len(rf.EventLogs))
 	}
 	return rel
@@ -247,8 +245,8 @@ func (rf *Raft) readPersist(data []byte) {
 	var EventLogs []LogEntry
 	var LastIncludedIndex int
 	var LastIncludedTerm int
-	if decoder.Decode(&CurrentTerm) != nil || decoder.Decode(&VotedFor) != nil || decoder.Decode(&EventLogs) != nil || decoder.Decode(&LastIncludedIndex) != nil || decoder.Decode(&LastIncludedTerm) != nil {
-		log.Printf("readPersist failed while decoding")
+	if decoder.Decode(&CurrentTerm) != nil || decoder.Decode(&VotedFor) != nil || decoder.Decode(&EventLogs) != nil || decoder.Decode(&LastIncludedTerm) != nil || decoder.Decode(&LastIncludedIndex) != nil {
+		//log.Printf("readPersist failed while decoding")
 	} else {
 		rf.CurrentTerm = CurrentTerm
 		rf.VotedFor = VotedFor
@@ -259,6 +257,7 @@ func (rf *Raft) readPersist(data []byte) {
 			rf.LastSnapshot = rf.persister.ReadSnapshot()
 		}
 		if len(rf.LastSnapshot) > 0 {
+			//log.Printf("last included index and term %d,%d", rf.LastIncludedIndex, rf.LastIncludedTerm)
 			msg := raftapi.ApplyMsg{
 				SnapshotValid: true,
 				Snapshot:      rf.LastSnapshot,
@@ -271,7 +270,7 @@ func (rf *Raft) readPersist(data []byte) {
 			rf.CommitIndex = rf.LastIncludedIndex
 			rf.LastApplied = rf.LastIncludedIndex
 		}
-		log.Printf("persisted logs for server %d are %v", rf.me, rf.EventLogs)
+		//log.Printf("persisted logs for server %d are %v", rf.me, rf.EventLogs)
 	}
 }
 
@@ -291,11 +290,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	log.Printf("snapshot index: %v", index)
-	log.Printf("snapshotting now")
 	if index <= rf.LastIncludedIndex {
 		//we have already created a snapshot of this. reject.
-		log.Printf("Already snapshotted this")
 		return
 	}
 	startIndex := rf.GetSnapshotLogIndex(index) //normalizing the index access.
@@ -341,7 +337,7 @@ func (rf *Raft) killed() bool {
 
 // InstallSnapshot this is on the receiving end of the installsnapshot RPC, have to handle edge cases and trim logs.
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	log.Println("InstallSnapshot called")
+	//log.Println("InstallSnapshot called")
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -440,7 +436,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 
 			//send an installsnapshot rpc.
 			if nextindex <= rf.LastIncludedIndex {
-				log.Printf("called install snapshot for server %d from server %d", server, rf.me)
+				//log.Printf("called install snapshot for server %d from server %d", server, rf.me)
 				request := InstallSnapshotArgs{
 					Term:              term,
 					LeaderId:          me,
@@ -490,7 +486,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 			}
 			rf.mu.Lock()
 			if reply.Term > term || rf.ServerState != Leader {
-				log.Printf("No longer in same term or no longer a leader.")
+				//log.Printf("No longer in same term or no longer a leader.")
 				rf.mu.Unlock()
 				return
 			}
@@ -558,11 +554,11 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 						reply := InstallSnapshotReply{}
 						ok := rf.peers[server].Call("Raft.InstallSnapshot", &request, &reply)
 						if !ok {
-							log.Printf("InstallSnapshot failed for server: %v", server)
+							//log.Printf("InstallSnapshot failed for server: %v", server)
 							time.Sleep(50 * time.Millisecond)
 						} else {
 							rf.mu.Lock()
-							log.Printf("InstallSnapshot succeeded for server: %v", server)
+							//log.Printf("InstallSnapshot succeeded for server: %v", server)
 							rf.NextIndex[server] = rf.LastIncludedIndex + 1
 							rf.MatchIndex[server] = rf.LastIncludedIndex
 						}
@@ -726,8 +722,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if firstDiff != -1 {
 			// truncate follower log at divergence point and append remaining leader entries
 			truncAbsolute := firstDiff + insertAbsolute
-			log.Printf("firstd diff and insertabsolute %v,%v", firstDiff, insertAbsolute)
-			log.Printf("server calling is %v", rf.me)
+			//log.Printf("firstd diff and insertabsolute %v,%v", firstDiff, insertAbsolute)
+			//log.Printf("server calling is %v", rf.me)
 			truncRel := rf.GetSnapshotLogIndex(truncAbsolute)
 			if truncRel < 0 {
 				truncRel = 0
@@ -1029,7 +1025,7 @@ func (rf *Raft) ticker() {
 		timeElapsed := time.Since(rf.LastHeartBeat)
 		isLeader := rf.ServerState == Leader
 		electionTimeout := rf.ElectionTimeout
-		log.Printf("event logs for server %v are %v ", rf.me, rf.EventLogs)
+		//log.Printf("event logs for server %v are %v ", rf.me, rf.EventLogs)
 		rf.mu.Unlock()
 		if !isLeader && timeElapsed > electionTimeout {
 			rf.StartElection()
@@ -1076,10 +1072,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.LastHeartBeat = time.Now()
 	rf.StopHeartBeat = make(chan struct{})
 	// initialize from ServerState persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-	rf.Cond = sync.NewCond(&rf.mu)
 	rf.LastIncludedTerm = 0
 	rf.LastIncludedIndex = 0
+	rf.Cond = sync.NewCond(&rf.mu)
+	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applier()

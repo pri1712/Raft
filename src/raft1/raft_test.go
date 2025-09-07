@@ -1265,7 +1265,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			ts.srvs[sender].Raft().Start(rand.Int())
 		}
 		text := fmt.Sprintf("submitting %v commands to %v", nn, sender)
-		log.Printf("Submitting %v commands to %v", nn, sender)
+		//log.Printf("Submitting %v commands to %v", nn, sender)
 		tester.AnnotateInfoInterval(start, text, text)
 
 		// let applier threads catch up with the Start()'s
