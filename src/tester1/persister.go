@@ -9,7 +9,9 @@ package tester
 // test with the original before submitting.
 //
 
-import "sync"
+import (
+	"sync"
+)
 
 type Persister struct {
 	mu        sync.Mutex
@@ -55,6 +57,8 @@ func (ps *Persister) Save(raftstate []byte, snapshot []byte) {
 	defer ps.mu.Unlock()
 	ps.raftstate = clone(raftstate)
 	ps.snapshot = clone(snapshot)
+	//log.Printf("Saving snapshot %v", ps.snapshot)
+	//log.Printf("saved snapshot size %v", len(ps.snapshot))
 }
 
 func (ps *Persister) ReadSnapshot() []byte {

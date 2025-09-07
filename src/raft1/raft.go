@@ -189,7 +189,7 @@ func (rf *Raft) GetSnapshotLogTerm(index int) int {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist(CurrentSnapshot []byte) {
+func (rf *Raft) persist() {
 	//to save to the disk.
 	// Your code here (3C).
 	// Example:
@@ -227,8 +227,7 @@ func (rf *Raft) persist(CurrentSnapshot []byte) {
 		return
 	}
 	raftState := writeBuffer.Bytes()
-	rf.persister.Save(raftState, CurrentSnapshot)
-	//log.Printf("Successfully persisted all 3 state variables")
+	rf.persister.Save(raftState, rf.LastSnapshot)
 }
 
 // restore previously persisted ServerState.
@@ -254,8 +253,25 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.CurrentTerm = CurrentTerm
 		rf.VotedFor = VotedFor
 		rf.EventLogs = EventLogs
-		rf.LastIncludedIndex = LastIncludedIndex
 		rf.LastIncludedTerm = LastIncludedTerm
+		rf.LastIncludedIndex = LastIncludedIndex
+		if rf.persister.SnapshotSize() != 0 {
+			rf.LastSnapshot = rf.persister.ReadSnapshot()
+		}
+		if len(rf.LastSnapshot) > 0 {
+			msg := raftapi.ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.LastSnapshot,
+				SnapshotTerm:  rf.LastIncludedTerm,
+				SnapshotIndex: rf.LastIncludedIndex,
+			}
+			go func() { rf.ApplicationChanel <- msg }()
+		}
+		if rf.LastIncludedIndex > 0 {
+			rf.CommitIndex = rf.LastIncludedIndex
+			rf.LastApplied = rf.LastIncludedIndex
+		}
+		log.Printf("persisted logs for server %d are %v", rf.me, rf.EventLogs)
 	}
 }
 
@@ -266,10 +282,11 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
+// that index. Raft should now trim its log as much as possible
+// so basically trim it upto the last included index.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
@@ -300,7 +317,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	newEventLogs = append(newEventLogs, rf.EventLogs[startIndex+1:]...)
 	rf.EventLogs = newEventLogs
 	rf.LastSnapshot = snapshot
-	rf.persist(snapshot)
+	rf.persist()
 	//persisted to disk
 }
 
@@ -354,7 +371,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	oldEventLogs := rf.EventLogs
 	oldLastIncludedIndex := rf.LastIncludedIndex
-
 	// relative index of snapshot boundary in old logs
 	relIndex := args.LastIncludedIndex - oldLastIncludedIndex
 	//dummy entry + entries after the snapshot point.
@@ -374,7 +390,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.LastApplied = args.LastIncludedIndex
 
 	// Persist
-	rf.persist(args.SnapshotData)
+	rf.persist()
 
 	// Release lock before notifying application
 	rf.mu.Unlock()
@@ -487,7 +503,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					close(rf.StopHeartBeat)
 					rf.StopHeartBeat = nil
 				}
-				rf.persist(nil)
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			}
@@ -602,7 +618,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader {
 		index = len(rf.EventLogs) + rf.LastIncludedIndex
 		rf.EventLogs = append(rf.EventLogs, LogEntry{Term: term, Command: command})
-		rf.persist(nil)
+		rf.persist()
 		//go rf.SendEventLogs(term, command)
 	} else {
 		return -1, term, false
@@ -634,7 +650,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.VotedFor = -1
 		rf.ServerState = Follower
 		rf.VoteCount = 0
-		rf.persist(nil)
+		rf.persist()
 	}
 
 	reply.Term = rf.CurrentTerm
@@ -723,7 +739,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			maxRealIndex = rf.LastIncludedIndex + (len(rf.EventLogs) - 1)
 		}
 		if needsPersistence {
-			rf.persist(nil)
+			rf.persist()
 		}
 	}
 
@@ -782,7 +798,7 @@ func (rf *Raft) SendHeartBeatToPeers(server int, term int, leaderId int) {
 			rf.VotedFor = -1
 			rf.ServerState = Follower
 			rf.VoteCount = 0
-			rf.persist(nil)
+			rf.persist()
 			return
 		}
 	}
@@ -846,7 +862,7 @@ func (rf *Raft) HandleVoteReplies(reply *RequestVoteReply, originalTerm int) {
 		rf.VotedFor = -1
 		rf.VoteCount = 0
 		rf.ServerState = Follower
-		rf.persist(nil)
+		rf.persist()
 		if rf.StopHeartBeat != nil {
 			close(rf.StopHeartBeat)
 			rf.StopHeartBeat = nil
@@ -929,7 +945,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.LastHeartBeat = time.Now()
 	}
-	rf.persist(nil)
+	rf.persist()
 }
 
 func (rf *Raft) StartElection() {
@@ -952,7 +968,7 @@ func (rf *Raft) StartElection() {
 	if lastLogIndex >= 0 {
 		lastLogTerm = rf.GetSnapshotLogTerm(lastLogIndex)
 	}
-	rf.persist(nil)
+	rf.persist()
 	rf.ElectionTimeout = time.Duration(rand.Intn(MaxTime-MinTime+1)+MinTime) * time.Millisecond
 	rf.mu.Unlock()
 	for i := range rf.peers {
@@ -1013,7 +1029,7 @@ func (rf *Raft) ticker() {
 		timeElapsed := time.Since(rf.LastHeartBeat)
 		isLeader := rf.ServerState == Leader
 		electionTimeout := rf.ElectionTimeout
-		//log.Printf("event logs for server %v are %v ", rf.me, rf.EventLogs)
+		log.Printf("event logs for server %v are %v ", rf.me, rf.EventLogs)
 		rf.mu.Unlock()
 		if !isLeader && timeElapsed > electionTimeout {
 			rf.StartElection()
