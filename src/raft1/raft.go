@@ -327,22 +327,19 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	log.Println("InstallSnapshot called")
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if rf.killed() {
-		rf.mu.Unlock()
 		return
 	}
 	reply.Term = rf.CurrentTerm
 
+	//reject if older term.
 	if args.Term < rf.CurrentTerm {
-		rf.mu.Unlock()
-		return
-	}
-	if args.LastIncludedIndex <= rf.LastIncludedIndex {
-		rf.mu.Unlock()
 		return
 	}
 
-	// Update term if needed
+	//update the current term if newer term found
 	if args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = args.Term
 		rf.VotedFor = -1
@@ -350,36 +347,48 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.VoteCount = 0
 	}
 
-	// Apply snapshot metadata
+	//if already snapshotted, reject.
+	if args.LastIncludedIndex <= rf.LastIncludedIndex {
+		return
+	}
+
+	oldEventLogs := rf.EventLogs
+	oldLastIncludedIndex := rf.LastIncludedIndex
+
+	// relative index of snapshot boundary in old logs
+	relIndex := args.LastIncludedIndex - oldLastIncludedIndex
+	//dummy entry + entries after the snapshot point.
+	newEventLogs := []LogEntry{{Term: args.LastIncludedTerm, Command: nil}}
+	if relIndex >= 0 && relIndex+1 < len(oldEventLogs) {
+		newEventLogs = append(newEventLogs, oldEventLogs[relIndex+1:]...)
+	}
+	rf.EventLogs = newEventLogs
+
+	// Update snapshot metadata
 	rf.LastIncludedIndex = args.LastIncludedIndex
 	rf.LastIncludedTerm = args.LastIncludedTerm
 	rf.LastSnapshot = args.SnapshotData
 
-	// Reset logs
-	newEventLogs := []LogEntry{{rf.LastIncludedTerm, nil}}
-	relIndex := rf.GetSnapshotLogIndex(args.LastIncludedIndex)
-	if relIndex >= 0 && relIndex+1 < len(rf.EventLogs) {
-		newEventLogs = append(newEventLogs, rf.EventLogs[relIndex+1:]...)
-	}
-	rf.EventLogs = newEventLogs
+	// Advance commit/applied
+	rf.CommitIndex = args.LastIncludedIndex
+	rf.LastApplied = args.LastIncludedIndex
 
-	// Update commit index
-	if rf.CommitIndex < rf.LastIncludedIndex {
-		rf.CommitIndex = rf.LastIncludedIndex
-	}
-	rf.LastApplied = rf.CommitIndex
-	// Persist all updated state + snapshot
+	// Persist
 	rf.persist(args.SnapshotData)
 
-	// apply to the applicn.
-	applymsg := raftapi.ApplyMsg{
-		Snapshot:      args.SnapshotData,
-		SnapshotIndex: rf.LastIncludedIndex,
-		SnapshotTerm:  rf.LastIncludedTerm,
-	}
-
+	// Release lock before notifying application
 	rf.mu.Unlock()
-	rf.ApplicationChanel <- applymsg
+
+	// Send one snapshot ApplyMsg
+	msg := raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.SnapshotData,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	rf.ApplicationChanel <- msg
+
+	rf.mu.Lock()
 }
 
 func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
@@ -415,6 +424,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 
 			//send an installsnapshot rpc.
 			if nextindex <= rf.LastIncludedIndex {
+				log.Printf("called install snapshot for server %d from server %d", server, rf.me)
 				request := InstallSnapshotArgs{
 					Term:              term,
 					LeaderId:          me,
@@ -431,7 +441,7 @@ func (rf *Raft) ReplicateLogsToFollower(server int, term int) {
 					time.Sleep(50 * time.Millisecond)
 				} else {
 					rf.mu.Lock()
-					log.Printf("InstallSnapshot succeeded for server: %v", server)
+					//log.Printf("InstallSnapshot succeeded for server: %v", server)
 					rf.NextIndex[server] = rf.LastIncludedIndex + 1
 					rf.MatchIndex[server] = rf.LastIncludedIndex
 					rf.mu.Unlock()
@@ -976,10 +986,10 @@ func (rf *Raft) applier() {
 			rf.LastApplied++
 			//log.Printf("Last applied index in the eventlog is %d", rf.LastApplied)
 			//log.Printf("Last included index is %d", rf.LastIncludedIndex)
-			log.Printf("event logs for server %v : %v", rf.me, rf.EventLogs)
+			//log.Printf("event logs for server %v : %v", rf.me, rf.EventLogs)
 			idx := rf.LastApplied
-			log.Printf("last applied : %v", rf.LastApplied)
-			log.Printf("last included : %v", rf.LastIncludedIndex)
+			//log.Printf("last applied : %v", rf.LastApplied)
+			//log.Printf("last included : %v", rf.LastIncludedIndex)
 			newidx := rf.GetSnapshotLogIndex(idx)
 			//log.Printf("New index after normalization: %d", newidx)
 			//log.Printf("idx is %v", idx)
@@ -1003,6 +1013,7 @@ func (rf *Raft) ticker() {
 		timeElapsed := time.Since(rf.LastHeartBeat)
 		isLeader := rf.ServerState == Leader
 		electionTimeout := rf.ElectionTimeout
+		//log.Printf("event logs for server %v are %v ", rf.me, rf.EventLogs)
 		rf.mu.Unlock()
 		if !isLeader && timeElapsed > electionTimeout {
 			rf.StartElection()
