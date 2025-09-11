@@ -376,22 +376,17 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	rf.EventLogs = newEventLogs
 
-	// Update snapshot metadata
 	rf.LastIncludedIndex = args.LastIncludedIndex
 	rf.LastIncludedTerm = args.LastIncludedTerm
 	rf.LastSnapshot = args.SnapshotData
 
-	// Advance commit/applied
 	rf.CommitIndex = args.LastIncludedIndex
 	rf.LastApplied = args.LastIncludedIndex
 
-	// Persist
 	rf.persist()
 
-	// Release lock before notifying application
 	rf.mu.Unlock()
-
-	// Send one snapshot ApplyMsg
+	
 	msg := raftapi.ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.SnapshotData,
